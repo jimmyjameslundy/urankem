@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>#U-RankEm</title>
+<style>
+:root{--bg:#10140f;--card:#1a2118;--ink:#f3efe4;--muted:#b7b09c;--line:#2c3628;--gold:#e3b341;--good:#7dbe63;--bad:#d1654c;--exact:#2e4a28;--miss:#3a2a1c}
+*{box-sizing:border-box}
+body{margin:0;font-family:Georgia,"Times New Roman",serif;background:var(--bg);color:var(--ink);min-height:100vh}
+button,input,select,textarea{font-family:system-ui,Segoe UI,sans-serif;font-size:14px;background:#0e130d;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+button{cursor:pointer}
+button.primary{background:var(--gold);color:#1a1406;border-color:var(--gold);font-weight:700}
+button.ghost{background:transparent}
+.wrap{max-width:1100px;margin:0 auto;padding:20px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:16px 20px;border-bottom:1px solid var(--line)}
+.brand{font-size:26px}.brand span{color:var(--gold)}
+.brand small{display:block;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-family:system-ui}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-top:16px}
+h1{font-size:32px;margin:8px 0 10px}
+h2{font-size:20px;margin:0 0 12px}
+.kicker{color:var(--gold);font-family:system-ui;font-size:12px;letter-spacing:.16em;text-transform:uppercase;margin:0}
+.lede,.muted,.hint{color:var(--muted);font-family:system-ui;font-size:13px;line-height:1.5}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+table{width:100%;border-collapse:collapse;font-family:system-ui;font-size:14px}
+th,td{text-align:left;padding:7px 6px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{color:var(--muted);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.rk{color:var(--gold);font-weight:700;width:36px}
+.num{font-variant-numeric:tabular-nums;font-weight:700}
+.chip{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 10px;font-family:system-ui;font-size:12px;margin:0 6px 6px 0}
+.flash{margin:10px 20px;padding:10px 12px;border-radius:8px;font-family:system-ui}
+.ok{background:#24351f}.err{background:#3a1f1f}
+.stack{display:grid;gap:8px;max-width:420px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+tr.exact{background:var(--exact)}tr.miss{background:var(--miss)}tr.dropped{background:#3a1f1f}
+code{font-family:ui-monospace,Consolas,monospace;background:#0e130d;padding:2px 6px;border-radius:6px}
+.invite{font-size:28px;letter-spacing:.2em;color:var(--gold)}
+@media(max-width:800px){.grid{grid-template-columns:1fr}h1{font-size:26px}}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span>#</span>U-RankEm<small>private college football pools</small></div>
+  <div class="row" id="nav"></div>
+</header>
+<div id="flashes"></div>
+<main class="wrap" id="app"></main>
+<script>
+const POLL_FALLBACK = {week:4,headline:"AP Top 25 — Week 4",ranks:[]};
+let S = {view:"home", session:null, snap:null, poll:null};
+
+function flash(msg, kind="ok"){
+  const d=document.createElement("div");
+  d.className="flash "+(kind==="ok"?"ok":"err");
+  d.textContent=msg;
+  document.getElementById("flashes").appendChild(d);
+  setTimeout(()=>d.remove(),5000);
+}
+async function api(path, body){
+  const opt = body==null ? {} : {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)};
+  const r = await fetch(path, opt);
+  const data = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(data.error||("Request failed "+r.status));
+  return data;
+}
+function saveSession(sess){ S.session=sess; localStorage.setItem("urankem_sess", JSON.stringify(sess)); }
+function loadSession(){ try{return JSON.parse(localStorage.getItem("urankem_sess"));}catch(e){return null;} }
+function ranks(){ return (S.snap&&S.snap.poll&&S.snap.poll.ranks)||(S.poll&&S.poll.ranks)||[]; }
+function teamName(row){ return Array.isArray(row)?row[1]:row.name; }
+function teamRec(row){ return Array.isArray(row)?row[2]:row.record||""; }
+function teamNext(row){ return Array.isArray(row)?row[3]:row.next||""; }
+function teamRank(row){ return Array.isArray(row)?row[0]:row.rank; }
+
+function render(){
+  document.getElementById("nav").innerHTML = S.session ? `
+    <span class="chip">${S.session.player}${S.session.is_host?" · host":""}</span>
+    <span class="chip">Pool ${S.session.code}</span>
+    <button class="ghost" onclick="go('board')">Board</button>
+    <button class="ghost" onclick="go('ballot')">Ballot</button>
+    <button class="ghost" onclick="go('standings')">Standings</button>
+    ${S.session.is_host?'<button class="ghost" onclick="go(\'host\')">Host</button>':''}
+    <button class="ghost" onclick="signOut()">Leave</button>` : "";
+  const app=document.getElementById("app");
+  if(!S.session) app.innerHTML = home();
+  else if(S.view==="ballot") app.innerHTML = ballotView();
+  else if(S.view==="standings") app.innerHTML = standingsView();
+  else if(S.view==="host") app.innerHTML = hostView();
+  else app.innerHTML = boardView();
+  bind();
+}
+function home(){
+  const q=new URLSearchParams(location.search).get("pool")||"";
+  return `
+  <p class="kicker">Anticipate the AP Top 20</p>
+  <h1>Start a private pool, or join one.</h1>
+  <p class="lede">Each pool has its own code, host, ballots, and standings. Friends only see the pool they join.</p>
+  <div class="grid">
+    <div class="card">
+      <h2>Create a pool</h2>
+      <p class="muted">You become the host. Share the 6-character code.</p>
+      <form class="stack" id="createF">
+        <input name="name" placeholder="Pool name — e.g. Saturday Crew" required>
+        <input name="host_name" placeholder="Your name" required>
+        <input name="host_pin" type="password" inputmode="numeric" placeholder="Host PIN (4+ digits)" required>
+        <button class="primary">Create pool</button>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Join / sign in</h2>
+      <form class="stack" id="joinF">
+        <input name="code" value="${q}" placeholder="Pool code" required maxlength="8" style="text-transform:uppercase">
+        <input name="name" placeholder="Your name" required>
+        <input name="pin" type="password" inputmode="numeric" placeholder="Your PIN (4+ digits)" required>
+        <button class="primary">Enter pool</button>
+      </form>
+      <p class="hint">First time in a pool: pick a PIN and remember it. Same name + PIN signs you back in.</p>
+    </div>
+  </div>
+  <div class="card">
+    <h2>How a week works</h2>
+    <p class="muted">Players submit a Top 20 ballot before Saturday 11:00 AM ET. After the AP poll posts Monday, the host pastes the official 1–20 and clicks Score. Exact rank = +10 + that rank. Miss = −difference. Team drops out of the Top 20 = −(20 − your pick). Weekly winner is the high score. Season total runs all year.</p>
+  </div>`;
+}
+function boardView(){
+  const p=S.snap.pool, players=S.snap.players||[], week=p.target_week;
+  const poll=ranks();
+  return `
+  <p class="kicker">${p.name}</p>
+  <h1>Pool board</h1>
+  <div><span class="chip">Code <b class="invite">${p.code}</b></span>
+       <span class="chip">Predicting week ${week}</span>
+       <span class="chip">${S.snap.poll.headline||""}</span></div>
+  <p class="muted">Invite link: <code>${location.origin}/?pool=${p.code}</code></p>
+  <div class="grid">
+    <div class="card">
+      <h2>Current poll + next game</h2>
+      <table><thead><tr><th>#</th><th>Team</th><th>Rec</th><th>Next</th></tr></thead>
+      <tbody>${poll.map(r=>`<tr><td class="rk">${teamRank(r)}</td><td>${teamName(r)}</td><td>${teamRec(r)}</td><td class="muted">${teamNext(r)}</td></tr>`).join("")}</tbody></table>
+    </div>
+    <div class="card">
+      <h2>Players</h2>
+      <table><thead><tr><th>Name</th><th>Week ${week} ballot</th></tr></thead>
+      <tbody>${players.map(pl=>{
+        const b=S.snap.ballots[pl.id];
+        return `<tr><td>${pl.name}${pl.is_host?" · host":""}</td><td>${b?'<span class="chip">submitted</span>':'<span class="muted">open</span>'}</td></tr>`;
+      }).join("")||'<tr><td colspan="2" class="muted">None yet</td></tr>'}</tbody></table>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" onclick="go('ballot')">Fill my ballot</button>
+        <button onclick="go('standings')">Standings</button>
+      </div>
+    </div>
+  </div>`;
+}
+function ballotView(){
+  const poll=ranks();
+  const extras=["Boise State","Virginia Tech","Clemson","Auburn","Florida State","Northwestern","Purdue","Illinois","South Carolina","Iowa State","Wake Forest","Minnesota"];
+  const names=[...poll.map(teamName),...extras];
+  const seen=new Set(); const teams=[];
+  names.forEach(n=>{if(n&&!seen.has(n)){seen.add(n);teams.push(n);}});
+  const me=S.snap.players.find(p=>p.name===S.session.player);
+  const cur=(me&&S.snap.ballots[me.id]&&S.snap.ballots[me.id].teams)||[];
+  const opts=teams.map(t=>`<option>${t}</option>`).join("");
+  return `
+  <p class="kicker">Due Saturday 11:00 AM ET</p>
+  <h1>Week ${S.snap.pool.target_week} ballot</h1>
+  <p class="lede">${S.session.player} — save any time, then submit. Host sees the submitted list, not your drafts on another phone.</p>
+  <div class="row">
+    <button type="button" id="copy20">Start from current Top 20</button>
+    <button type="button" id="clearB">Clear</button>
+    <button class="primary" id="saveB">Save and submit</button>
+  </div>
+  <div class="card">
+    <table>
+      <thead><tr><th>#</th><th>Current team</th><th>Rec</th><th>Next</th><th>Your pick for this slot</th></tr></thead>
+      <tbody>${[...Array(20)].map((_,i)=>{
+        const row=poll[i]||[];
+        return `<tr>
+          <td class="rk">${i+1}</td>
+          <td>${teamName(row)||""}</td>
+          <td>${teamRec(row)||""}</td>
+          <td class="muted">${teamNext(row)||""}</td>
+          <td><select data-i="${i}"><option value="">— team —</option>${teams.map(t=>`<option ${t===(cur[i]||"")?"selected":""}>${t}</option>`).join("")}</select></td>
+        </tr>`;
+      }).join("")}
+      ${poll.filter(r=>teamRank(r)>20).map(r=>`<tr>
+        <td class="rk">${teamRank(r)}</td><td>${teamName(r)}</td><td>${teamRec(r)}</td>
+        <td class="muted">${teamNext(r)}</td><td class="muted">outside scoring window</td></tr>`).join("")}
+      </tbody>
+    </table>
+  </div>`;
+}
+function standingsView(){
+  const scores=S.snap.scores||{};
+  const weeks=Object.keys(scores).sort((a,b)=>+b-+a);
+  const latest=weeks[0];
+  const weekRows=(scores[latest]||[]).slice().sort((a,b)=>b.total-a.total);
+  const names={}; (S.snap.players||[]).forEach(p=>names[p.id]=p.name);
+  const winner=weekRows[0];
+  return `
+  <p class="kicker">${S.snap.pool.name}</p>
+  <h1>Standings</h1>
+  <div class="grid">
+    <div class="card">
+      <h2>${latest?("Week "+latest+" winner"):"This week"}</h2>
+      ${!weekRows.length?'<p class="muted">Host scores after the AP poll posts Monday.</p>':
+        `<p class="lede">${names[winner.player_id]||"?"} — <b class="num">${winner.total}</b> pts</p>
+         <table><thead><tr><th>#</th><th>Player</th><th>Pts</th><th>Exact</th></tr></thead>
+         <tbody>${weekRows.map((r,i)=>`<tr><td>${i+1}</td><td>${names[r.player_id]||"?"}</td><td class="num">${r.total}</td><td>${r.exact}</td></tr>`).join("")}</tbody></table>`}
+    </div>
+    <div class="card">
+      <h2>Season</h2>
+      ${!(S.snap.season||[]).length?'<p class="muted">Accumulates after each scored week. Final overall winner is #1 here at season end.</p>':
+        `<table><thead><tr><th>#</th><th>Player</th><th>Season</th><th>Week wins</th><th>Weeks</th></tr></thead>
+         <tbody>${S.snap.season.map((r,i)=>`<tr><td>${i+1}</td><td>${r.name}</td><td class="num">${r.pts}</td><td>${r.wins}</td><td>${r.weeks}</td></tr>`).join("")}</tbody></table>`}
+    </div>
+  </div>
+  ${(weekRows[0]&&weekRows[0].lines)?weekRows.map(r=>`
+    <div class="card"><h2>${names[r.player_id]} — ${r.total} pts</h2>
+    <table><thead><tr><th>Pick</th><th>Team</th><th>Actual</th><th>Note</th><th>Pts</th></tr></thead>
+    <tbody>${r.lines.map(d=>`<tr class="${d.type}"><td>${d.pick}</td><td>${d.team}</td><td>${d.actual??"OUT"}</td><td>${d.note}</td><td class="num">${d.pts}</td></tr>`).join("")}</tbody></table></div>`).join(""):""}`;
+}
+function hostView(){
+  if(!S.session.is_host) return `<p class="muted">Host only.</p>`;
+  const list=ranks().slice(0,25).map(r=>teamRank(r)+". "+teamName(r)).join("\n");
+  const week=S.snap.pool.target_week;
+  return `
+  <p class="kicker">Host desk</p>
+  <h1>Score and publish</h1>
+  <div class="card">
+    <h2>Invite</h2>
+    <p>Code <span class="invite">${S.snap.pool.code}</span></p>
+    <p class="muted">Send friends: ${location.origin}/?pool=${S.snap.pool.code}</p>
+  </div>
+  <div class="card">
+    <h2>Official AP Top 20 for week <input id="offWeek" type="number" value="${week}" style="width:70px"></h2>
+    <p class="muted">Monday after the poll posts, paste 20 teams. Then Score. Scoring uses 1–20 only.</p>
+    <textarea id="offText" style="width:100%;min-height:220px">${list}</textarea>
+    <div class="row" style="margin-top:10px">
+      <button id="saveOff">Save official poll</button>
+      <button class="primary" id="scoreNow">Score this week</button>
+      <button id="copyRep">Copy results for the group</button>
+    </div>
+  </div>`;
+}
+function reportText(){
+  const scores=S.snap.scores||{};
+  const weeks=Object.keys(scores).sort((a,b)=>+b-+a);
+  const latest=weeks[0];
+  const names={}; (S.snap.players||[]).forEach(p=>names[p.id]=p.name);
+  const rows=(scores[latest]||[]).slice().sort((a,b)=>b.total-a.total);
+  const lines=[`#U-RankEm — ${S.snap.pool.name}`, latest?`Week ${latest} results`:"No week scored yet", ""];
+  rows.forEach((r,i)=>lines.push(`${i+1}. ${names[r.player_id]} — ${r.total} pts (${r.exact} exact)`));
+  if(rows[0]) lines.push("", `Weekly winner: ${names[rows[0].player_id]}`);
+  lines.push("", "Season:");
+  (S.snap.season||[]).forEach((r,i)=>lines.push(`${i+1}. ${r.name} — ${r.pts} pts, ${r.wins} week win(s)`));
+  if((S.snap.season||[])[0]) lines.push("", `Overall leader: ${S.snap.season[0].name}`);
+  return lines.join("\n");
+}
+function bind(){
+  const c=document.getElementById("createF");
+  if(c) c.onsubmit=async e=>{
+    e.preventDefault();
+    const f=new FormData(c);
+    try{
+      const data=await api("/api/pools",{name:f.get("name"),host_name:f.get("host_name"),host_pin:f.get("host_pin")});
+      enter(data, f.get("host_pin")); flash("Pool created. Share code "+data.code);
+    }catch(err){ flash(err.message,"err"); }
+  };
+  const j=document.getElementById("joinF");
+  if(j) j.onsubmit=async e=>{
+    e.preventDefault();
+    const f=new FormData(j);
+    const code=(f.get("code")||"").toUpperCase();
+    try{
+      let data;
+      try{ data=await api("/api/pools/"+code+"/join",{name:f.get("name"),pin:f.get("pin")}); }
+      catch(err){ data=await api("/api/signin",{code,name:f.get("name"),pin:f.get("pin")}); }
+      enter(data, f.get("pin")); flash("You're in "+data.code);
+    }catch(err){ flash(err.message,"err"); }
+  };
+  const saveB=document.getElementById("saveB");
+  if(saveB) saveB.onclick=submitBallot;
+  const copy20=document.getElementById("copy20");
+  if(copy20) copy20.onclick=()=>{
+    ranks().slice(0,20).forEach((r,i)=>{const s=document.querySelector(`select[data-i="${i}"]`); if(s) s.value=teamName(r);});
+  };
+  const clearB=document.getElementById("clearB");
+  if(clearB) clearB.onclick=()=>document.querySelectorAll("select[data-i]").forEach(s=>s.value="");
+  const saveOff=document.getElementById("saveOff");
+  if(saveOff) saveOff.onclick=saveOfficial;
+  const scoreNow=document.getElementById("scoreNow");
+  if(scoreNow) scoreNow.onclick=scoreWeek;
+  const copyRep=document.getElementById("copyRep");
+  if(copyRep) copyRep.onclick=()=>{
+    const t=reportText();
+    navigator.clipboard.writeText(t).then(()=>flash("Results copied. Paste into the group text.")).catch(()=>flash(t));
+  };
+}
+async function submitBallot(){
+  const teams=[...document.querySelectorAll("select[data-i]")].map(s=>s.value);
+  try{
+    const data=await api("/api/ballot",{...S.session, teams, week:S.snap.pool.target_week});
+    S.snap=data.snapshot; S.view="board"; render(); flash("Ballot submitted.");
+  }catch(err){ flash(err.message,"err"); }
+}
+async function saveOfficial(){
+  const week=+document.getElementById("offWeek").value;
+  const ranks=[];
+  document.getElementById("offText").value.split(/\n/).forEach(line=>{
+    const m=line.trim().match(/^(?:(\d+)[.)]\s*)?(.+)$/);
+    if(m&&m[2]) ranks.push({rank:m[1]?+m[1]:ranks.length+1, name:m[2].trim()});
+  });
+  try{
+    const data=await api("/api/official",{...S.session, week, ranks});
+    S.snap=data.snapshot; flash("Official poll saved for week "+week);
+    render();
+  }catch(err){ flash(err.message,"err"); }
+}
+async function scoreWeek(){
+  const week=+document.getElementById("offWeek").value;
+  try{
+    const data=await api("/api/score",{...S.session, week});
+    S.snap=data.snapshot; S.view="standings"; render();
+    flash("Week "+week+" scored. Copy results and send them to the group.");
+  }catch(err){ flash(err.message,"err"); }
+}
+function enter(data, pin){
+  saveSession({code:data.code, name:data.player, pin:pin, player:data.player, is_host:data.is_host});
+  S.snap=data.snapshot; S.poll=data.snapshot.poll; S.view="board";
+  history.replaceState({}, "", "/?pool="+data.code);
+  render();
+}
+function signOut(){
+  localStorage.removeItem("urankem_sess");
+  S.session=null; S.snap=null; S.view="home";
+  render();
+}
+function go(view){ S.view=view; render(); }
+
+(async function boot(){
+  try{ S.poll=await api("/api/poll"); }catch(e){ S.poll=POLL_FALLBACK; }
+  const saved=loadSession();
+  const code=new URLSearchParams(location.search).get("pool");
+  if(saved&&saved.code){
+    try{
+      const data=await api("/api/signin", saved);
+      S.session=saved; S.session.is_host=data.is_host; S.snap=data.snapshot; S.view="board";
+    }catch(e){ localStorage.removeItem("urankem_sess"); }
+  }
+  render();
+})();
+</script>
+</body>
+</html>
