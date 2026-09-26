@@ -538,12 +538,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not pname or len(pin) < 4:
                     raise ValueError("Name and a 4+ digit PIN are required.")
                 existing = conn.execute(
-                    "SELECT * FROM players WHERE pool_id=? AND name=?",
+                    "SELECT * FROM players WHERE pool_id=? AND lower(name)=lower(?)",
                     (pool["id"], pname),
                 ).fetchone()
                 if existing:
                     if existing["pin"] != pin:
-                        raise ValueError("That name is taken in this pool. Use your PIN to sign in.")
+                        raise ValueError("That name is already in this pool. Enter the PIN you used before, or pick a different name.")
                     player = existing
                 else:
                     conn.execute(
