@@ -148,6 +148,7 @@ function boardView(){
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="go('ballot')">Fill my ballot</button>
         <button onclick="go('standings')">Standings</button>
+        <button class="ghost" onclick="signOut()">Join a different pool</button>
       </div>
     </div>
   </div>`;
@@ -286,9 +287,7 @@ function bind(){
     const f=new FormData(j);
     const code=(f.get("code")||"").toUpperCase();
     try{
-      let data;
-      try{ data=await api("/api/pools/"+code+"/join",{name:f.get("name"),pin:f.get("pin")}); }
-      catch(err){ data=await api("/api/signin",{code,name:f.get("name"),pin:f.get("pin")}); }
+      const data=await api("/api/pools/"+encodeURIComponent(code)+"/join",{name:f.get("name"),pin:f.get("pin")});
       enter(data, f.get("pin")); flash("You're in "+data.code);
     }catch(err){ flash(err.message,"err"); }
   };
@@ -374,7 +373,13 @@ function go(view){ S.view=view; render(); }
   try{ await api("/api/tick"); }catch(e){}
   try{ S.poll=await api("/api/poll"); }catch(e){ S.poll=POLL_FALLBACK; }
   const saved=loadSession();
-  const code=new URLSearchParams(location.search).get("pool");
+  const invited=(new URLSearchParams(location.search).get("pool")||"").toUpperCase();
+  if(invited && (!saved || (saved.code||"").toUpperCase()!==invited)){
+    S.session=null;
+    S.view="home";
+    render();
+    return;
+  }
   if(saved&&saved.code){
     try{
       const data=await api("/api/signin", saved);
