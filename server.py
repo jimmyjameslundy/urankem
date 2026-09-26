@@ -6,12 +6,14 @@ import json
 import os
 import random
 import sqlite3
-import string
 import threading
+import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+ESPN_RANKINGS = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/rankings"
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -114,8 +116,22 @@ def init_db():
             lines TEXT NOT NULL,
             PRIMARY KEY(pool_id, week, player_id)
         );
+        CREATE TABLE IF NOT EXISTS reports (
+            pool_id INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
+            week INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            created TEXT NOT NULL,
+            PRIMARY KEY(pool_id, week)
+        );
+        CREATE TABLE IF NOT EXISTS meta (
+            k TEXT PRIMARY KEY,
+            v TEXT NOT NULL
+        );
         """
     )
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(pools)")]
+    if "host_email" not in cols:
+        conn.execute("ALTER TABLE pools ADD COLUMN host_email TEXT DEFAULT ''")
     conn.commit()
     conn.close()
 
@@ -139,7 +155,137 @@ def score_slot(pick, actual):
 
 
 def official_map(ranks):
-    return {r["name"]: r["rank"] for r in ranks if 1 <= r.get("rank", 0) <= 20}
+    out = {}
+    for r in ranks:
+        if 1 <= r.get("rank", 0) <= 20:
+            out[norm(r["name"])] = r["rank"]
+            out[r["name"]] = r["rank"]
+    return out
+
+
+def norm(name):
+    return " ".join((name or "").lower().replace(".", "").split())
+
+
+def fetch_ap():
+    req = urllib.request.Request(ESPN_RANKINGS, headers={"User-Agent": "U-RankEm/1.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode())
+    poll = None
+    for block in data.get("rankings") or []:
+        if str(block.get("id")) == "1" or "AP" in (block.get("name") or ""):
+            poll = block
+            break
+    if not poll:
+        raise ValueError("AP poll not in ESPN feed.")
+    week = int((poll.get("occurrence") or {}).get("number") or 0)
+    ranks = []
+    for row in poll.get("ranks") or []:
+        team = row.get("team") or {}
+        name = team.get("nickname") or team.get("location") or team.get("displayName") or ""
+        rec = ""
+        recs = team.get("recordSummary") or team.get("record")
+        if isinstance(recs, str):
+            rec = recs
+        ranks.append(
+            {
+                "rank": int(row.get("current") or 0),
+                "name": name,
+                "record": rec,
+                "next": "",
+            }
+        )
+    live = {
+        "week": week,
+        "headline": poll.get("headline") or f"AP Top 25 — Week {week}",
+        "updated": poll.get("lastUpdated") or now(),
+        "ranks": [[r["rank"], r["name"], r["record"], r["next"]] for r in ranks],
+        "official": [{"rank": r["rank"], "name": r["name"]} for r in ranks],
+    }
+    return live
+
+
+def score_pool_week(conn, pool, week, official_ranks):
+    mapping = official_map(official_ranks)
+    ballots = conn.execute(
+        "SELECT player_id, teams FROM ballots WHERE pool_id=? AND week=?",
+        (pool["id"], week),
+    ).fetchall()
+    if not ballots:
+        return None
+    conn.execute("DELETE FROM scores WHERE pool_id=? AND week=?", (pool["id"], week))
+    names = {
+        r["id"]: r["name"]
+        for r in conn.execute("SELECT id, name FROM players WHERE pool_id=?", (pool["id"],))
+    }
+    results = []
+    for b in ballots:
+        teams = json.loads(b["teams"])
+        lines = []
+        for i, team in enumerate(teams):
+            pick = i + 1
+            actual = mapping.get(team) or mapping.get(norm(team))
+            slot = score_slot(pick, actual)
+            lines.append({"pick": pick, "team": team, "actual": actual, **slot})
+        total = sum(x["pts"] for x in lines)
+        exact = sum(1 for x in lines if x["type"] == "exact")
+        conn.execute(
+            "INSERT INTO scores(pool_id,week,player_id,total,exact,lines) VALUES(?,?,?,?,?,?)",
+            (pool["id"], week, b["player_id"], total, exact, json.dumps(lines)),
+        )
+        results.append(
+            {"name": names.get(b["player_id"], "?"), "total": total, "exact": exact}
+        )
+    results.sort(key=lambda x: (-x["total"], x["name"]))
+    lines = [f"#U-RankEm — {pool['name']}", f"Week {week} scored from the published AP poll", ""]
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r['name']} — {r['total']} pts ({r['exact']} exact)")
+    if results:
+        lines.append("")
+        lines.append(f"Weekly winner: {results[0]['name']}")
+    text = "\n".join(lines)
+    conn.execute(
+        """INSERT INTO reports(pool_id,week,text,created) VALUES(?,?,?,?)
+           ON CONFLICT(pool_id,week) DO UPDATE SET text=excluded.text, created=excluded.created""",
+        (pool["id"], week, text, now()),
+    )
+    conn.execute(
+        "UPDATE pools SET target_week=? WHERE id=? AND target_week<=?",
+        (week + 1, pool["id"], week),
+    )
+    return {"week": week, "players": len(results), "report": text}
+
+
+def apply_published_poll(conn, live):
+    week = live["week"]
+    official = live["official"]
+    if week < 1 or len(official) < 20:
+        return {"poll": live, "scored": []}
+    scored = []
+    for pool in conn.execute("SELECT * FROM pools").fetchall():
+        conn.execute(
+            """INSERT INTO official(pool_id,week,ranks) VALUES(?,?,?)
+               ON CONFLICT(pool_id,week) DO UPDATE SET ranks=excluded.ranks""",
+            (pool["id"], week, json.dumps(official)),
+        )
+        already = conn.execute(
+            "SELECT 1 FROM scores WHERE pool_id=? AND week=? LIMIT 1",
+            (pool["id"], week),
+        ).fetchone()
+        has_ballots = conn.execute(
+            "SELECT 1 FROM ballots WHERE pool_id=? AND week=? LIMIT 1",
+            (pool["id"], week),
+        ).fetchone()
+        if has_ballots and not already:
+            result = score_pool_week(conn, pool, week, official)
+            if result:
+                scored.append({"code": pool["code"], "name": pool["name"], **result})
+    conn.execute(
+        "INSERT INTO meta(k,v) VALUES('last_poll',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        (json.dumps(live),),
+    )
+    conn.commit()
+    return {"poll": live, "week": week, "scored": scored}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -291,27 +437,51 @@ class Handler(BaseHTTPRequestHandler):
             for pid, v in season.items()
         ]
         season_list.sort(key=lambda x: (-x["pts"], -x["wins"], x["name"]))
+        report = conn.execute(
+            "SELECT week, text, created FROM reports WHERE pool_id=? ORDER BY week DESC LIMIT 1",
+            (pool["id"],),
+        ).fetchone()
+        live_row = conn.execute("SELECT v FROM meta WHERE k='last_poll'").fetchone()
+        poll = json.loads(live_row["v"]) if live_row else DEFAULT_POLL
         return {
             "pool": {
                 "code": pool["code"],
                 "name": pool["name"],
                 "host_name": pool["host_name"],
+                "host_email": pool["host_email"] if "host_email" in pool.keys() else "",
                 "target_week": pool["target_week"],
                 "created": pool["created"],
             },
+            "report": dict(report) if report else None,
             "players": players,
             "ballots": ballots,
             "official": official_out,
             "scores": scores,
             "season": season_list,
-            "poll": DEFAULT_POLL,
+            "poll": poll,
         }
 
     def _api_get(self, path, qs):
         if path == "/api/health":
             return self._json(200, {"ok": True, "service": "U-RankEm"})
         if path == "/api/poll":
-            return self._json(200, DEFAULT_POLL)
+            conn = db()
+            try:
+                row = conn.execute("SELECT v FROM meta WHERE k='last_poll'").fetchone()
+                return self._json(200, json.loads(row["v"]) if row else DEFAULT_POLL)
+            finally:
+                conn.close()
+        if path == "/api/tick":
+            conn = db()
+            try:
+                live = fetch_ap()
+                with LOCK:
+                    out = apply_published_poll(conn, live)
+                return self._json(200, out)
+            except Exception as e:
+                return self._json(502, {"error": f"Could not read AP poll: {e}"})
+            finally:
+                conn.close()
         parts = path.strip("/").split("/")
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "pool":
             code = parts[2].upper()
@@ -332,6 +502,7 @@ class Handler(BaseHTTPRequestHandler):
                 name = (body.get("name") or "").strip()
                 host = (body.get("host_name") or "").strip()
                 pin = (body.get("host_pin") or "").strip()
+                email = (body.get("host_email") or "").strip()
                 if not name or not host or len(pin) < 4:
                     raise ValueError("Pool name, your name, and a 4+ digit PIN are required.")
                 for _ in range(20):
@@ -339,8 +510,8 @@ class Handler(BaseHTTPRequestHandler):
                     if not conn.execute("SELECT 1 FROM pools WHERE code=?", (code,)).fetchone():
                         break
                 conn.execute(
-                    "INSERT INTO pools(code,name,host_name,host_pin,target_week,created) VALUES(?,?,?,?,?,?)",
-                    (code, name, host, pin, TARGET_WEEK, now()),
+                    "INSERT INTO pools(code,name,host_name,host_pin,target_week,created,host_email) VALUES(?,?,?,?,?,?,?)",
+                    (code, name, host, pin, TARGET_WEEK, now(), email),
                 )
                 pid = conn.execute("SELECT id FROM pools WHERE code=?", (code,)).fetchone()["id"]
                 conn.execute(
