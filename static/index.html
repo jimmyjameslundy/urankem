@@ -102,6 +102,7 @@ function home(){
         <input name="name" placeholder="Pool name — e.g. Saturday Crew" required>
         <input name="host_name" placeholder="Your name" required>
         <input name="host_pin" type="password" inputmode="numeric" placeholder="Host PIN (4+ digits)" required>
+        <input name="host_email" type="email" placeholder="Your email (for the weekly report)">
         <button class="primary">Create pool</button>
       </form>
     </div>
@@ -232,6 +233,19 @@ function hostView(){
     <p class="muted">Send friends: ${location.origin}/?pool=${S.snap.pool.code}</p>
   </div>
   <div class="card">
+    <h2>Automatic scoring</h2>
+    <p class="muted">The site reads the published AP poll. When a new week posts (usually Sunday night / Monday), every submitted ballot is scored. Open this page or tap the button below.</p>
+    <div class="row">
+      <button class="primary" id="tickNow">Check AP poll and score now</button>
+    </div>
+    ${S.snap.report?`<p class="lede" style="margin-top:12px">Last scored week ${S.snap.report.week} · ${S.snap.report.created}</p>
+      <pre style="white-space:pre-wrap;font-family:system-ui">${S.snap.report.text}</pre>
+      <div class="row">
+        <button id="copyRep2">Copy report</button>
+        ${S.snap.pool.host_email?`<a class="chip" href="mailto:${S.snap.pool.host_email}?subject=${encodeURIComponent('U-RankEm week '+S.snap.report.week)}&body=${encodeURIComponent(S.snap.report.text)}">Email this report to the host</a>`:''}
+      </div>`:'<p class="muted">No week scored yet. Ballots are waiting for the next AP poll.</p>'}
+  </div>
+  <div class="card">
     <h2>Official AP Top 20 for week <input id="offWeek" type="number" value="${week}" style="width:70px"></h2>
     <p class="muted">Monday after the poll posts, paste 20 teams. Then Score. Scoring uses 1–20 only.</p>
     <textarea id="offText" style="width:100%;min-height:220px">${list}</textarea>
@@ -262,7 +276,7 @@ function bind(){
     e.preventDefault();
     const f=new FormData(c);
     try{
-      const data=await api("/api/pools",{name:f.get("name"),host_name:f.get("host_name"),host_pin:f.get("host_pin")});
+      const data=await api("/api/pools",{name:f.get("name"),host_name:f.get("host_name"),host_pin:f.get("host_pin"),host_email:f.get("host_email")});
       enter(data, f.get("host_pin")); flash("Pool created. Share code "+data.code);
     }catch(err){ flash(err.message,"err"); }
   };
@@ -292,9 +306,28 @@ function bind(){
   if(scoreNow) scoreNow.onclick=scoreWeek;
   const copyRep=document.getElementById("copyRep");
   if(copyRep) copyRep.onclick=()=>{
-    const t=reportText();
+    const t=(S.snap.report&&S.snap.report.text)||reportText();
     navigator.clipboard.writeText(t).then(()=>flash("Results copied. Paste into the group text.")).catch(()=>flash(t));
   };
+  const copyRep2=document.getElementById("copyRep2");
+  if(copyRep2) copyRep2.onclick=()=>{
+    const t=(S.snap.report&&S.snap.report.text)||reportText();
+    navigator.clipboard.writeText(t).then(()=>flash("Report copied.")).catch(()=>flash(t));
+  };
+  const tickNow=document.getElementById("tickNow");
+  if(tickNow) tickNow.onclick=checkPoll;
+}
+async function checkPoll(){
+  try{
+    const out=await api("/api/tick");
+    if(S.session){
+      const fresh=await api("/api/pool/"+S.session.code);
+      S.snap=fresh; S.poll=fresh.poll;
+    }
+    const n=(out.scored||[]).length;
+    flash(n?("AP Week "+out.week+" posted. "+n+" pool(s) scored."):("AP Week "+(out.week||"?")+" is current. No new ballots to score."));
+    render();
+  }catch(err){ flash(err.message,"err"); }
 }
 async function submitBallot(){
   const teams=[...document.querySelectorAll("select[data-i]")].map(s=>s.value);
@@ -338,6 +371,7 @@ function signOut(){
 function go(view){ S.view=view; render(); }
 
 (async function boot(){
+  try{ await api("/api/tick"); }catch(e){}
   try{ S.poll=await api("/api/poll"); }catch(e){ S.poll=POLL_FALLBACK; }
   const saved=loadSession();
   const code=new URLSearchParams(location.search).get("pool");
