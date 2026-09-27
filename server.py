@@ -19,7 +19,26 @@ try:
 except ImportError:
     psycopg2 = None
 
-ESPN_RANKINGS = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/rankings"
+ESPN_RANKINGS = "https://site.web.api.espn.com/apis/site/v2/sports/football/college-football/rankings"
+ESPN_SCOREBOARD = "https://site.web.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard"
+HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.espn.com/college-football/rankings",
+}
+ALIASES = {
+    "mississippi st": "mississippi state",
+    "mississippi state": "mississippi state",
+    "boise st": "boise state",
+    "boise state": "boise state",
+    "oklahoma st": "oklahoma state",
+    "oklahoma state": "oklahoma state",
+    "penn st": "penn state",
+    "pitt": "pittsburgh",
+    "miami": "miami",
+    "miami fl": "miami",
+}
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -268,19 +287,66 @@ def official_map(ranks):
     out = {}
     for r in ranks:
         if 1 <= r.get("rank", 0) <= 20:
-            out[norm(r["name"])] = r["rank"]
+            key = canon(r["name"])
+            out[key] = r["rank"]
             out[r["name"]] = r["rank"]
+            out[norm(r["name"])] = r["rank"]
     return out
 
 
 def norm(name):
-    return " ".join((name or "").lower().replace(".", "").split())
+    return " ".join((name or "").lower().replace(".", "").replace("'", "").split())
+
+
+def canon(name):
+    n = norm(name)
+    return ALIASES.get(n, n)
+
+
+def http_json(url):
+    req = urllib.request.Request(url, headers=HTTP_HEADERS)
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode())
+
+
+def scoreboard_index(week):
+    recs = {}
+    nxt = {}
+    try:
+        data = http_json(f"{ESPN_SCOREBOARD}?week={int(week)}&seasontype=2&limit=300")
+    except Exception:
+        return recs, nxt
+    for ev in data.get("events") or []:
+        comps = (ev.get("competitions") or [{}])[0]
+        teams = comps.get("competitors") or []
+        if len(teams) < 2:
+            continue
+        status = ((ev.get("status") or {}).get("type") or {}).get("state")
+        scheduled = status in (None, "pre")
+        pair = []
+        for c in teams:
+            team = c.get("team") or {}
+            name = team.get("shortDisplayName") or team.get("nickname") or team.get("location") or ""
+            rec = ""
+            for recrow in c.get("records") or []:
+                if recrow.get("type") == "total" or recrow.get("name") == "overall":
+                    rec = recrow.get("summary") or ""
+                    break
+            recs[canon(name)] = rec
+            pair.append((name, c.get("homeAway") == "home", rec))
+        if scheduled and len(pair) == 2:
+            a, b = pair
+            def label(me, opp):
+                at = "vs" if me[1] else "at"
+                extra = f" ({opp[2]})" if opp[2] else ""
+                return f"{at} {opp[0]}{extra}"
+            nxt[canon(a[0])] = label(a, b)
+            nxt[canon(b[0])] = label(b, a)
+    return recs, nxt
 
 
 def fetch_ap():
-    req = urllib.request.Request(ESPN_RANKINGS, headers={"User-Agent": "U-RankEm/1.0"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        data = json.loads(resp.read().decode())
+    data = http_json(ESPN_RANKINGS)
     poll = None
     for block in data.get("rankings") or []:
         if str(block.get("id")) == "1" or "AP" in (block.get("name") or ""):
@@ -289,27 +355,48 @@ def fetch_ap():
     if not poll:
         raise ValueError("AP poll not in ESPN feed.")
     week = int((poll.get("occurrence") or {}).get("number") or 0)
-    ranks = []
-    for row in poll.get("ranks") or []:
-        team = row.get("team") or {}
-        name = team.get("nickname") or team.get("location") or team.get("displayName") or ""
-        rec = ""
-        recs = team.get("recordSummary") or team.get("record")
-        if isinstance(recs, str):
-            rec = recs
-        ranks.append(
-            {
-                "rank": int(row.get("current") or 0),
-                "name": name,
-                "record": rec,
-                "next": "",
-            }
-        )
+    recs, nxt = {}, {}
+    for w in (week, week + 1, week - 1):
+        if w < 1:
+            continue
+        r, n = scoreboard_index(w)
+        recs.update(r)
+        nxt.update(n)
+
+    def rows_from(items, start_rank=None):
+        out = []
+        for i, row in enumerate(items or []):
+            team = row.get("team") or {}
+            name = team.get("nickname") or team.get("location") or team.get("displayName") or ""
+            rank = int(row.get("current") or 0) or (start_rank + i if start_rank else 0)
+            rec = row.get("recordSummary") or recs.get(canon(name)) or ""
+            if rec in ("", "0-0"):
+                rec = recs.get(canon(name)) or rec
+            out.append(
+                {
+                    "rank": rank,
+                    "name": name,
+                    "record": rec,
+                    "next": nxt.get(canon(name)) or "TBD",
+                }
+            )
+        return out
+
+    ranks = rows_from(poll.get("ranks") or [])
+    extra = rows_from(poll.get("others") or [], start_rank=26)
+    combined = ranks + extra
+    seen = {canon(r["name"]) for r in combined}
+    # keep a 30-row board
+    n = 26
+    for r in extra:
+        if r["rank"] < 26:
+            r["rank"] = n
+            n += 1
     live = {
         "week": week,
         "headline": poll.get("headline") or f"AP Top 25 — Week {week}",
         "updated": poll.get("lastUpdated") or now(),
-        "ranks": [[r["rank"], r["name"], r["record"], r["next"]] for r in ranks],
+        "ranks": [[r["rank"], r["name"], r["record"], r["next"]] for r in combined[:30]],
         "official": [{"rank": r["rank"], "name": r["name"]} for r in ranks],
     }
     return live
@@ -334,7 +421,7 @@ def score_pool_week(conn, pool, week, official_ranks):
         lines = []
         for i, team in enumerate(teams):
             pick = i + 1
-            actual = mapping.get(team) or mapping.get(norm(team))
+            actual = mapping.get(team) or mapping.get(norm(team)) or mapping.get(canon(team))
             slot = score_slot(pick, actual)
             lines.append({"pick": pick, "team": team, "actual": actual, **slot})
         total = sum(x["pts"] for x in lines)
