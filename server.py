@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#U-RankEm multi-pool web server. Stdlib only. Bind $PORT for Render/Railway."""
+"""#U-RankEm multi-pool web server. Postgres when DATABASE_URL is set."""
 from __future__ import annotations
 
 import json
@@ -12,6 +12,12 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+try:
+    import psycopg2
+    import psycopg2.extras
+except ImportError:
+    psycopg2 = None
 
 ESPN_RANKINGS = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/rankings"
 
@@ -61,78 +67,182 @@ DEFAULT_POLL = {
 }
 
 LOCK = threading.Lock()
+DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
+USE_PG = bool(DATABASE_URL)
+
+
+class Conn:
+    """Tiny wrapper: ? placeholders, dict rows, commit/close."""
+
+    def __init__(self, raw, pg):
+        self.raw = raw
+        self.pg = pg
+
+    def _sql(self, sql):
+        return sql.replace("?", "%s") if self.pg else sql
+
+    def execute(self, sql, args=()):
+        cur = self.raw.cursor()
+        cur.execute(self._sql(sql), args)
+        return cur
+
+    def fetchone(self):
+        raise RuntimeError("call on cursor")
+
+    def commit(self):
+        self.raw.commit()
+
+    def close(self):
+        self.raw.close()
+
+
+class CursorView:
+    def __init__(self, cur, pg):
+        self.cur = cur
+        self.pg = pg
+
+    def fetchone(self):
+        row = self.cur.fetchone()
+        return _row(row, self.pg)
+
+    def fetchall(self):
+        return [_row(r, self.pg) for r in self.cur.fetchall()]
+
+
+def _row(row, pg):
+    if row is None:
+        return None
+    if pg:
+        return row
+    return row
 
 
 def db():
+    if USE_PG:
+        if not psycopg2:
+            raise RuntimeError("psycopg2 is required when DATABASE_URL is set")
+        url = DATABASE_URL
+        if url.startswith("postgres://"):
+            url = "postgresql://" + url[len("postgres://") :]
+        raw = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
+        return PgConn(raw)
     conn = sqlite3.connect(DB, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    return SqliteConn(conn)
+
+
+class SqliteConn:
+    def __init__(self, raw):
+        self.raw = raw
+
+    def execute(self, sql, args=()):
+        return self.raw.execute(sql, args)
+
+    def commit(self):
+        self.raw.commit()
+
+    def close(self):
+        self.raw.close()
+
+
+class PgConn:
+    def __init__(self, raw):
+        self.raw = raw
+
+    def execute(self, sql, args=()):
+        cur = self.raw.cursor()
+        cur.execute(sql.replace("?", "%s"), args)
+        return cur
+
+    def commit(self):
+        self.raw.commit()
+
+    def close(self):
+        self.raw.close()
+
+
+SCHEMA_PG = """
+CREATE TABLE IF NOT EXISTS pools (
+    id SERIAL PRIMARY KEY,
+    code TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    host_name TEXT NOT NULL,
+    host_pin TEXT NOT NULL,
+    target_week INTEGER NOT NULL DEFAULT 5,
+    created TEXT NOT NULL,
+    host_email TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS players (
+    id SERIAL PRIMARY KEY,
+    pool_id INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    pin TEXT NOT NULL,
+    is_host INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(pool_id, name)
+);
+CREATE TABLE IF NOT EXISTS ballots (
+    id SERIAL PRIMARY KEY,
+    pool_id INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
+    player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    week INTEGER NOT NULL,
+    teams TEXT NOT NULL,
+    submitted TEXT NOT NULL,
+    UNIQUE(pool_id, player_id, week)
+);
+CREATE TABLE IF NOT EXISTS official (
+    pool_id INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
+    week INTEGER NOT NULL,
+    ranks TEXT NOT NULL,
+    PRIMARY KEY(pool_id, week)
+);
+CREATE TABLE IF NOT EXISTS scores (
+    pool_id INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
+    week INTEGER NOT NULL,
+    player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    total INTEGER NOT NULL,
+    exact INTEGER NOT NULL,
+    lines TEXT NOT NULL,
+    PRIMARY KEY(pool_id, week, player_id)
+);
+CREATE TABLE IF NOT EXISTS reports (
+    pool_id INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
+    week INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    created TEXT NOT NULL,
+    PRIMARY KEY(pool_id, week)
+);
+CREATE TABLE IF NOT EXISTS meta (
+    k TEXT PRIMARY KEY,
+    v TEXT NOT NULL
+);
+"""
+
+SCHEMA_SQLITE = SCHEMA_PG.replace("id SERIAL PRIMARY KEY", "id INTEGER PRIMARY KEY")
 
 
 def init_db():
     conn = db()
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS pools (
-            id INTEGER PRIMARY KEY,
-            code TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            host_name TEXT NOT NULL,
-            host_pin TEXT NOT NULL,
-            target_week INTEGER NOT NULL DEFAULT 5,
-            created TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS players (
-            id INTEGER PRIMARY KEY,
-            pool_id INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
-            name TEXT NOT NULL,
-            pin TEXT NOT NULL,
-            is_host INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(pool_id, name)
-        );
-        CREATE TABLE IF NOT EXISTS ballots (
-            id INTEGER PRIMARY KEY,
-            pool_id INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
-            player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
-            week INTEGER NOT NULL,
-            teams TEXT NOT NULL,
-            submitted TEXT NOT NULL,
-            UNIQUE(pool_id, player_id, week)
-        );
-        CREATE TABLE IF NOT EXISTS official (
-            pool_id INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
-            week INTEGER NOT NULL,
-            ranks TEXT NOT NULL,
-            PRIMARY KEY(pool_id, week)
-        );
-        CREATE TABLE IF NOT EXISTS scores (
-            pool_id INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
-            week INTEGER NOT NULL,
-            player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
-            total INTEGER NOT NULL,
-            exact INTEGER NOT NULL,
-            lines TEXT NOT NULL,
-            PRIMARY KEY(pool_id, week, player_id)
-        );
-        CREATE TABLE IF NOT EXISTS reports (
-            pool_id INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
-            week INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            created TEXT NOT NULL,
-            PRIMARY KEY(pool_id, week)
-        );
-        CREATE TABLE IF NOT EXISTS meta (
-            k TEXT PRIMARY KEY,
-            v TEXT NOT NULL
-        );
-        """
-    )
-    cols = [r["name"] for r in conn.execute("PRAGMA table_info(pools)")]
-    if "host_email" not in cols:
-        conn.execute("ALTER TABLE pools ADD COLUMN host_email TEXT DEFAULT ''")
-    conn.commit()
+    if USE_PG:
+        cur = conn.raw.cursor()
+        cur.execute(SCHEMA_PG)
+        conn.commit()
+        cur = conn.raw.cursor()
+        cur.execute(
+            """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name='pools' AND column_name='host_email'
+            """
+        )
+        if not cur.fetchone():
+            conn.raw.cursor().execute("ALTER TABLE pools ADD COLUMN host_email TEXT DEFAULT ''")
+            conn.commit()
+    else:
+        conn.raw.executescript(SCHEMA_SQLITE)
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(pools)")]
+        if "host_email" not in cols:
+            conn.execute("ALTER TABLE pools ADD COLUMN host_email TEXT DEFAULT ''")
+        conn.commit()
     conn.close()
 
 
@@ -463,7 +573,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_get(self, path, qs):
         if path == "/api/health":
-            return self._json(200, {"ok": True, "service": "U-RankEm"})
+            return self._json(200, {"ok": True, "service": "U-RankEm", "db": "postgres" if USE_PG else "sqlite"})
         if path == "/api/poll":
             conn = db()
             try:
