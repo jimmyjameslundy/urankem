@@ -77,12 +77,14 @@ function render(){
     <span class="chip">Pool ${S.session.code}</span>
     <button class="ghost" onclick="go('board')">Board</button>
     <button class="ghost" onclick="go('ballot')">Ballot</button>
+    <button class="ghost" onclick="go('mine')">My card</button>
     <button class="ghost" onclick="go('standings')">Standings</button>
     ${S.session.is_host?'<button class="ghost" onclick="go(\'host\')">Host</button>':''}
     <button class="ghost" onclick="signOut()">Leave</button>` : "";
   const app=document.getElementById("app");
   if(!S.session) app.innerHTML = home();
   else if(S.view==="ballot") app.innerHTML = ballotView();
+  else if(S.view==="mine") app.innerHTML = mineView();
   else if(S.view==="standings") app.innerHTML = standingsView();
   else if(S.view==="host") app.innerHTML = hostView();
   else app.innerHTML = boardView();
@@ -111,6 +113,7 @@ function home(){
       <form class="stack" id="joinF">
         <input name="code" value="${q}" placeholder="Pool code" required maxlength="8" style="text-transform:uppercase">
         <input name="name" placeholder="Your name" required>
+        <input name="email" type="email" placeholder="Your email (so the host can reach you)">
         <input name="pin" type="password" inputmode="numeric" placeholder="Your PIN (4+ digits)" required>
         <button class="primary">Enter pool</button>
       </form>
@@ -191,6 +194,29 @@ function ballotView(){
     </table>
   </div>`;
 }
+function mineView(){
+  const me=(S.snap.players||[]).find(p=>p.name===S.session.player);
+  if(!me) return `<p class="muted">Sign in again.</p>`;
+  const weeks=Object.keys(S.snap.scores||{}).sort((a,b)=>+a-+b);
+  const mine=[];
+  weeks.forEach(w=>{
+    const row=(S.snap.scores[w]||[]).find(r=>r.player_id===me.id);
+    if(row) mine.push({week:w, ...row});
+  });
+  const season=(S.snap.season||[]).find(r=>r.player_id===me.id);
+  const ballot=S.snap.ballots[me.id];
+  return `
+  <p class="kicker">${S.session.player}</p>
+  <h1>My card</h1>
+  <p class="lede">${season?("Season "+season.pts+" pts · "+season.wins+" week win(s)"):"No scored weeks yet."}</p>
+  <div class="card">
+    <h2>This week's ballot (week ${S.snap.pool.target_week})</h2>
+    ${ballot?`<ol>${ballot.teams.map(t=>`<li>${t}</li>`).join("")}</ol><p class="muted">Submitted ${ballot.submitted}</p>`:'<p class="muted">Not submitted yet.</p>'}
+  </div>
+  ${mine.map(r=>`<div class="card"><h2>Week ${r.week} — ${r.total} pts, ${r.exact} exact</h2>
+    <table><thead><tr><th>Pick</th><th>Team</th><th>Actual</th><th>Note</th><th>Pts</th></tr></thead>
+    <tbody>${(r.lines||[]).map(d=>`<tr class="${d.type}"><td>${d.pick}</td><td>${d.team}</td><td>${d.actual??"OUT"}</td><td>${d.note}</td><td class="num">${d.pts}</td></tr>`).join("")}</tbody></table></div>`).join("")||'<div class="card"><p class="muted">Scores appear after the AP poll is published.</p></div>'}`;
+}
 function standingsView(){
   const scores=S.snap.scores||{};
   const weeks=Object.keys(scores).sort((a,b)=>+b-+a);
@@ -238,6 +264,7 @@ function hostView(){
     <p class="muted">The site reads the published AP poll. When a new week posts (usually Sunday night / Monday), every submitted ballot is scored. Open this page or tap the button below.</p>
     <div class="row">
       <button class="primary" id="tickNow">Check AP poll and score now</button>
+      <button id="dlXlsx">Download Excel report</button>
     </div>
     ${S.snap.report?`<p class="lede" style="margin-top:12px">Last scored week ${S.snap.report.week} · ${S.snap.report.created}</p>
       <pre style="white-space:pre-wrap;font-family:system-ui">${S.snap.report.text}</pre>
@@ -287,7 +314,7 @@ function bind(){
     const f=new FormData(j);
     const code=(f.get("code")||"").toUpperCase();
     try{
-      const data=await api("/api/pools/"+encodeURIComponent(code)+"/join",{name:f.get("name"),pin:f.get("pin")});
+      const data=await api("/api/pools/"+encodeURIComponent(code)+"/join",{name:f.get("name"),pin:f.get("pin"),email:f.get("email")});
       enter(data, f.get("pin")); flash("You're in "+data.code);
     }catch(err){ flash(err.message,"err"); }
   };
@@ -315,6 +342,11 @@ function bind(){
   };
   const tickNow=document.getElementById("tickNow");
   if(tickNow) tickNow.onclick=checkPoll;
+  const dl=document.getElementById("dlXlsx");
+  if(dl) dl.onclick=()=>{
+    const q=new URLSearchParams({code:S.session.code, name:S.session.player, pin:S.session.pin});
+    window.location = "/api/export?"+q.toString();
+  };
 }
 async function checkPoll(){
   try{
