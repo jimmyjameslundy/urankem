@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS players (
     pool_id INTEGER NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     pin TEXT NOT NULL,
+    email TEXT DEFAULT '',
     is_host INTEGER NOT NULL DEFAULT 0,
     UNIQUE(pool_id, name)
 );
@@ -256,11 +257,24 @@ def init_db():
         if not cur.fetchone():
             conn.raw.cursor().execute("ALTER TABLE pools ADD COLUMN host_email TEXT DEFAULT ''")
             conn.commit()
+        cur = conn.raw.cursor()
+        cur.execute(
+            """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name='players' AND column_name='email'
+            """
+        )
+        if not cur.fetchone():
+            conn.raw.cursor().execute("ALTER TABLE players ADD COLUMN email TEXT DEFAULT ''")
+            conn.commit()
     else:
         conn.raw.executescript(SCHEMA_SQLITE)
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(pools)")]
         if "host_email" not in cols:
             conn.execute("ALTER TABLE pools ADD COLUMN host_email TEXT DEFAULT ''")
+        pcols = [r["name"] for r in conn.execute("PRAGMA table_info(players)")]
+        if "email" not in pcols:
+            conn.execute("ALTER TABLE players ADD COLUMN email TEXT DEFAULT ''")
         conn.commit()
     conn.close()
 
@@ -485,6 +499,87 @@ def apply_published_poll(conn, live):
     return {"poll": live, "week": week, "scored": scored}
 
 
+def build_workbook(conn, pool):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+
+    snap_players = list(conn.execute(
+        "SELECT id, name, email, is_host FROM players WHERE pool_id=? ORDER BY name",
+        (pool["id"],),
+    ))
+    names = {r["id"]: r["name"] for r in snap_players}
+    emails = {r["id"]: r["email"] or "" for r in snap_players}
+    wb = Workbook()
+    gold = PatternFill("solid", fgColor="E3B341")
+    head = Font(name="Arial", bold=True)
+
+    ws = wb.active
+    ws.title = "Season"
+    ws.append(["Player", "Email", "Host", "Season points", "Week wins", "Weeks scored"])
+    for c in ws[1]:
+        c.font = head
+        c.fill = gold
+    season = {}
+    scores = list(conn.execute(
+        "SELECT week, player_id, total, exact, lines FROM scores WHERE pool_id=? ORDER BY week, total DESC",
+        (pool["id"],),
+    ))
+    by_week = {}
+    for r in scores:
+        by_week.setdefault(r["week"], []).append(r)
+        season.setdefault(r["player_id"], {"pts": 0, "weeks": 0, "wins": 0})
+        season[r["player_id"]]["pts"] += r["total"]
+        season[r["player_id"]]["weeks"] += 1
+    for week, rows in by_week.items():
+        best = max(x["total"] for x in rows)
+        for x in rows:
+            if x["total"] == best:
+                season[x["player_id"]]["wins"] += 1
+    for p in snap_players:
+        s = season.get(p["id"], {"pts": 0, "weeks": 0, "wins": 0})
+        ws.append([p["name"], p["email"] or "", "yes" if p["is_host"] else "", s["pts"], s["wins"], s["weeks"]])
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 28
+
+    ww = wb.create_sheet("Weekly")
+    ww.append(["Week", "Place", "Player", "Email", "Points", "Exact"])
+    for c in ww[1]:
+        c.font = head
+        c.fill = gold
+    for week in sorted(by_week):
+        rows = sorted(by_week[week], key=lambda x: -x["total"])
+        for i, r in enumerate(rows, 1):
+            ww.append([week, i, names.get(r["player_id"], "?"), emails.get(r["player_id"], ""), r["total"], r["exact"]])
+
+    bb = wb.create_sheet("Ballots")
+    bb.append(["Week", "Player", "Email", "Slot", "Team"])
+    for c in bb[1]:
+        c.font = head
+        c.fill = gold
+    for r in conn.execute(
+        "SELECT b.week, p.name, p.email, b.teams FROM ballots b JOIN players p ON p.id=b.player_id WHERE b.pool_id=? ORDER BY b.week, p.name",
+        (pool["id"],),
+    ):
+        for i, team in enumerate(json.loads(r["teams"]), 1):
+            bb.append([r["week"], r["name"], r["email"] or "", i, team])
+
+    pp = wb.create_sheet("Current poll")
+    pp.append(["Rank", "Team", "Record", "Next"])
+    for c in pp[1]:
+        c.font = head
+        c.fill = gold
+    live = conn.execute("SELECT v FROM meta WHERE k='last_poll'").fetchone()
+    if live:
+        poll = json.loads(live["v"])
+        pp.append(["Headline", poll.get("headline") or "", "Week", poll.get("week")])
+        for row in poll.get("ranks") or []:
+            if isinstance(row, list):
+                pp.append(row[:4])
+            else:
+                pp.append([row.get("rank"), row.get("name"), row.get("record"), row.get("next")])
+    return wb
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[{self.log_date_time_string()}] {fmt % args}", flush=True)
@@ -536,6 +631,32 @@ class Handler(BaseHTTPRequestHandler):
             return self._file(dest, ctype)
         self._json(404, {"error": "Not found"})
 
+    def _export(self, qs):
+        code = (qs.get("code") or [""])[0]
+        name = (qs.get("name") or [""])[0]
+        pin = (qs.get("pin") or [""])[0]
+        conn = db()
+        try:
+            pool = self._pool(conn, code)
+            player = self._player(conn, pool["id"], name, pin)
+            if not player["is_host"]:
+                return self._json(403, {"error": "Only the host can download the pool spreadsheet."})
+            wb = build_workbook(conn, pool)
+            import io
+            buf = io.BytesIO()
+            wb.save(buf)
+            data = buf.getvalue()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            self.send_header("Content-Disposition", f'attachment; filename="U-RankEm-{pool["code"]}.xlsx"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            self._json(400, {"error": str(e)})
+        finally:
+            conn.close()
+
     def _file(self, path: Path, ctype: str):
         if not path.is_file():
             self._json(404, {"error": "Missing file"})
@@ -576,7 +697,7 @@ class Handler(BaseHTTPRequestHandler):
         players = [
             dict(r)
             for r in conn.execute(
-                "SELECT id, name, is_host FROM players WHERE pool_id=? ORDER BY name",
+                "SELECT id, name, is_host, email FROM players WHERE pool_id=? ORDER BY name",
                 (pool["id"],),
             )
         ]
@@ -659,6 +780,8 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _api_get(self, path, qs):
+        if path == "/api/export":
+            return self._export(qs)
         if path == "/api/health":
             return self._json(200, {"ok": True, "service": "U-RankEm", "db": "postgres" if USE_PG else "sqlite"})
         if path == "/api/poll":
@@ -732,6 +855,7 @@ class Handler(BaseHTTPRequestHandler):
                 pool = self._pool(conn, code)
                 pname = (body.get("name") or "").strip()
                 pin = (body.get("pin") or "").strip()
+                email = (body.get("email") or "").strip()
                 if not pname or len(pin) < 4:
                     raise ValueError("Name and a 4+ digit PIN are required.")
                 existing = conn.execute(
@@ -741,11 +865,14 @@ class Handler(BaseHTTPRequestHandler):
                 if existing:
                     if existing["pin"] != pin:
                         raise ValueError("That name is already in this pool. Enter the PIN you used before, or pick a different name.")
-                    player = existing
+                    if email:
+                        conn.execute("UPDATE players SET email=? WHERE id=?", (email, existing["id"]))
+                        conn.commit()
+                    player = conn.execute("SELECT * FROM players WHERE id=?", (existing["id"],)).fetchone()
                 else:
                     conn.execute(
-                        "INSERT INTO players(pool_id,name,pin,is_host) VALUES(?,?,?,0)",
-                        (pool["id"], pname, pin),
+                        "INSERT INTO players(pool_id,name,pin,is_host,email) VALUES(?,?,?,0,?)",
+                        (pool["id"], pname, pin, email),
                     )
                     conn.commit()
                     player = conn.execute(
