@@ -65,7 +65,17 @@ async function api(path, body){
 }
 function saveSession(sess){ S.session=sess; localStorage.setItem("urankem_sess", JSON.stringify(sess)); }
 function loadSession(){ try{return JSON.parse(localStorage.getItem("urankem_sess"));}catch(e){return null;} }
-function ranks(){ return (S.snap&&S.snap.poll&&S.snap.poll.ranks)||(S.poll&&S.poll.ranks)||[]; }
+function viewedWeek(){ return S.week||(S.snap&&S.snap.pool&&S.snap.pool.target_week)||5; }
+function pollFor(week){
+  const w=String(week);
+  if(S.snap&&S.snap.polls&&S.snap.polls[w]) return S.snap.polls[w];
+  const live=(S.snap&&S.snap.poll)||S.poll;
+  if(live&&String(live.week)===w) return live;
+  const off=S.snap&&S.snap.official&&S.snap.official[w];
+  if(off&&off.length) return {week:+w,headline:"Official Top 20 — week "+w,ranks:off.map(r=>[r.rank,r.name,"",""])};
+  return {week:+w,headline:"No stored poll for week "+w,ranks:[]};
+}
+function ranks(){ return pollFor(viewedWeek()).ranks||[]; }
 function teamName(row){ return Array.isArray(row)?row[1]:row.name; }
 function teamRec(row){ return Array.isArray(row)?row[2]:row.record||""; }
 function teamNext(row){ return Array.isArray(row)?row[3]:row.next||""; }
@@ -155,7 +165,7 @@ function boardView(){
   <h1>Pool board</h1>
   <div><span class="chip">Code <b class="invite">${p.code}</b></span>
        <span class="chip">Predicting week ${week}</span>
-       <span class="chip">${S.snap.poll.headline||""}</span></div>
+       <span class="chip">${pollFor(week).headline||""}</span></div>
   <p class="muted">Invite link: <code>${location.origin}/?pool=${p.code}</code></p>
   <div class="grid">
     <div class="card">
