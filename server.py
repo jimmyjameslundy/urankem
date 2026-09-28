@@ -704,8 +704,17 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json(400, {"error": str(e)})
 
+    def _as_dict(self, row):
+        if row is None:
+            return None
+        if isinstance(row, dict):
+            return row
+        if hasattr(row, "keys"):
+            return {k: row[k] for k in row.keys()}
+        return row
+
     def _pool(self, conn, code):
-        row = conn.execute("SELECT * FROM pools WHERE code=?", (code.upper(),)).fetchone()
+        row = self._as_dict(conn.execute("SELECT * FROM pools WHERE code=?", (code.upper(),)).fetchone())
         if not row:
             raise ValueError("No pool with that code.")
         return row
@@ -721,13 +730,21 @@ class Handler(BaseHTTPRequestHandler):
         return row
 
     def _snapshot(self, conn, pool):
-        players = [
-            dict(r)
-            for r in conn.execute(
+        try:
+            player_rows = conn.execute(
                 "SELECT id, name, is_host, email FROM players WHERE pool_id=? ORDER BY name",
                 (pool["id"],),
             )
-        ]
+        except Exception:
+            player_rows = conn.execute(
+                "SELECT id, name, is_host FROM players WHERE pool_id=? ORDER BY name",
+                (pool["id"],),
+            )
+        players = []
+        for r in player_rows:
+            d = self._as_dict(r)
+            d.setdefault("email", "")
+            players.append(d)
         week = pool["target_week"]
         ballots = {}
         ballots_by_week = {}
@@ -890,7 +907,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
             if path.endswith("/join") and path.startswith("/api/pools/"):
-                code = path.split("/")[3].upper()
+                parts = [p for p in path.split("/") if p]
+                code = (body.get("code") or (parts[2] if len(parts) >= 4 else "")).upper()
+                if not code or code == "JOIN":
+                    raise ValueError("Pool code missing. Use the invite link or type the 6-character code.")
                 pool = self._pool(conn, code)
                 pname = (body.get("name") or "").strip()
                 pin = (body.get("pin") or "").strip()
