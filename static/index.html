@@ -80,6 +80,29 @@ function livePollRanks(){
   const live=(S.snap&&S.snap.poll)||S.poll||{};
   return live.ranks||[];
 }
+async function fillCurrentTop20(){
+  try{
+    const live=await api("/api/poll");
+    if(S.snap) S.snap.poll=live;
+    S.poll=live;
+    const src=(live.ranks||[]).slice(0,20);
+    if(!src.length){ flash("Could not load the live AP Top 20.","err"); return; }
+    src.forEach((r,i)=>{
+      const s=document.querySelector('select[data-i="'+i+'"]');
+      if(!s) return;
+      const name=teamName(r);
+      if([...s.options].some(o=>o.value===name)) s.value=name;
+    });
+    flash("Filled from live AP: "+(live.headline||("week "+live.week)));
+  }catch(err){ flash(err.message,"err"); }
+}
+function clearBallotPicks(){
+  document.querySelectorAll("select[data-i]").forEach(s=>{
+    s.value="";
+    s.selectedIndex=0;
+  });
+  flash("Ballot cleared.");
+}
 function teamName(row){ return Array.isArray(row)?row[1]:row.name; }
 function teamRec(row){ return Array.isArray(row)?row[2]:row.record||""; }
 function teamNext(row){ return Array.isArray(row)?row[3]:row.next||""; }
@@ -220,8 +243,8 @@ function ballotView(){
   <p class="lede">${locked?("Open card is week "+open+". This week is view-only."):(S.session.player+" — save and submit for week "+open+".")}</p>
   ${scored?'<p class="muted">This week is already scored.</p>':''}
   <div class="row">
-    <button type="button" id="copy20" ${locked?"disabled":""}>Start from current Top 20</button>
-    <button type="button" id="clearB" ${locked?"disabled":""}>Clear</button>
+    <button type="button" id="copy20" onclick="fillCurrentTop20()">Start from current Top 20</button>
+    <button type="button" id="clearB" onclick="clearBallotPicks()">Clear</button>
     <button class="primary" id="saveB" ${locked?"disabled":""}>Save and submit</button>
   </div>
   <div class="card">
@@ -234,7 +257,7 @@ function ballotView(){
           <td>${teamName(row)||""}</td>
           <td>${teamRec(row)||""}</td>
           <td class="muted">${teamNext(row)||""}</td>
-          <td><select data-i="${i}"><option value="">— team —</option>${teams.map(t=>`<option ${t===(cur[i]||"")?"selected":""}>${t}</option>`).join("")}</select></td>
+          <td><select data-i="${i}"><option value="">— team —</option>${teams.map(t=>`<option value="${t}" ${t===(cur[i]||"")?"selected":""}>${t}</option>`).join("")}</select></td>
         </tr>`;
       }).join("")}
       ${poll.filter(r=>teamRank(r)>20).map(r=>`<tr>
