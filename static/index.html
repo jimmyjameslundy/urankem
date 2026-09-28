@@ -367,7 +367,12 @@ function hostView(){
   </div>
   <div class="card">
     <h2>Ballots submitted for week ${week}</h2>
-    ${Object.keys(ballots).length?`<table><thead><tr><th>Player</th><th>Ballot</th></tr></thead><tbody>${Object.entries(ballots).map(([id,b])=>`<tr><td>${names[id]||id}</td><td>${(b.teams||[]).map((t,i)=>(i+1)+". "+t).join(" · ")}</td></tr>`).join("")}</tbody></table>`:'<p class="muted">No ballots stored as week '+week+'. Try the week number on each scored card (your 55-pt card is week 5).</p>'}
+    ${Object.keys(ballots).length?`<div style="overflow:auto"><table>
+      <thead><tr><th>Player</th>${[...Array(20)].map((_,i)=>`<th class="rk">${i+1}</th>`).join("")}</tr></thead>
+      <tbody>${Object.entries(ballots).map(([id,b])=>{
+        const t=b.teams||[];
+        return `<tr><td>${names[id]||id}</td>${[...Array(20)].map((_,i)=>`<td>${t[i]||""}</td>`).join("")}</tr>`;
+      }).join("")}</tbody></table></div>`:'<p class="muted">No ballots stored as week '+week+'.</p>'}
   </div>
   <div class="card">
     <h2>Official AP Top 20 for week <input id="offWeek" type="number" value="${week}" style="width:70px"></h2>
