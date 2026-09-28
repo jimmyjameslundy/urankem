@@ -153,12 +153,37 @@ def db():
     return SqliteConn(conn)
 
 
+def row_dict(row):
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return dict(row)
+    if hasattr(row, "keys"):
+        return {k: row[k] for k in row.keys()}
+    return row
+
+
+class DictCursor:
+    def __init__(self, cur):
+        self.cur = cur
+
+    def fetchone(self):
+        return row_dict(self.cur.fetchone())
+
+    def fetchall(self):
+        return [row_dict(r) for r in self.cur.fetchall()]
+
+    def __iter__(self):
+        for r in self.cur:
+            yield row_dict(r)
+
+
 class SqliteConn:
     def __init__(self, raw):
         self.raw = raw
 
     def execute(self, sql, args=()):
-        return self.raw.execute(sql, args)
+        return DictCursor(self.raw.execute(sql, args))
 
     def commit(self):
         self.raw.commit()
@@ -174,7 +199,7 @@ class PgConn:
     def execute(self, sql, args=()):
         cur = self.raw.cursor()
         cur.execute(sql.replace("?", "%s"), args)
-        return cur
+        return DictCursor(cur)
 
     def commit(self):
         self.raw.commit()
@@ -702,7 +727,9 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 self._api_post(path, body)
         except Exception as e:
-            self._json(400, {"error": str(e)})
+            import traceback
+            tb = traceback.format_exc().splitlines()[-4:]
+            self._json(400, {"error": f"{type(e).__name__}: {e} | " + " / ".join(tb)})
 
     def _as_dict(self, row):
         if row is None:
