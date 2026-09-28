@@ -518,6 +518,10 @@ def apply_published_poll(conn, live):
         "INSERT INTO meta(k,v) VALUES('last_poll',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
         (json.dumps(live),),
     )
+    conn.execute(
+        "INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        (f"poll_w{week}", json.dumps(live)),
+    )
     conn.commit()
     return {"poll": live, "week": week, "scored": scored}
 
@@ -785,6 +789,15 @@ class Handler(BaseHTTPRequestHandler):
         ).fetchone()
         live_row = conn.execute("SELECT v FROM meta WHERE k='last_poll'").fetchone()
         poll = json.loads(live_row["v"]) if live_row else DEFAULT_POLL
+        polls = {}
+        for row in conn.execute("SELECT k, v FROM meta WHERE k LIKE 'poll_w%'"):
+            wk = str(row["k"]).replace("poll_w", "")
+            try:
+                polls[wk] = json.loads(row["v"])
+            except Exception:
+                pass
+        if poll.get("week"):
+            polls.setdefault(str(poll["week"]), poll)
         return {
             "pool": {
                 "code": pool["code"],
@@ -802,6 +815,7 @@ class Handler(BaseHTTPRequestHandler):
             "scores": scores,
             "season": season_list,
             "poll": poll,
+            "polls": polls,
         }
 
     def _api_get(self, path, qs):
