@@ -834,7 +834,7 @@ class Handler(BaseHTTPRequestHandler):
         live_row = conn.execute("SELECT v FROM meta WHERE k='last_poll'").fetchone()
         poll = json.loads(live_row["v"]) if live_row else DEFAULT_POLL
         polls = {}
-        for row in conn.execute("SELECT k, v FROM meta WHERE k LIKE 'poll_w%'"):
+        for row in conn.execute("SELECT k, v FROM meta WHERE k LIKE ?", ("poll_w%",)):
             wk = str(row["k"]).replace("poll_w", "")
             try:
                 polls[wk] = json.loads(row["v"])
