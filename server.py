@@ -383,8 +383,7 @@ def scoreboard_index(week):
         teams = comps.get("competitors") or []
         if len(teams) < 2:
             continue
-        status = ((ev.get("status") or {}).get("type") or {}).get("state")
-        scheduled = status in (None, "pre")
+        st = (ev.get("status") or {}).get("type") or {}
         pair = []
         for c in teams:
             team = c.get("team") or {}
@@ -395,11 +394,14 @@ def scoreboard_index(week):
                     rec = recrow.get("summary") or ""
                     break
             recs[canon(name)] = rec
-            pair.append((name, c.get("homeAway") == "home", rec))
-        if scheduled and len(pair) == 2:
+            pair.append((name, c.get("homeAway") == "home", rec, c.get("score")))
+        if len(pair) == 2:
             a, b = pair
+            final = st.get("state") == "post" or st.get("completed")
             def label(me, opp):
                 at = "vs" if me[1] else "at"
+                if final and me[3] not in (None, "") and opp[3] not in (None, ""):
+                    return f"{at} {opp[0]} {me[3]}-{opp[3]}"
                 extra = f" ({opp[2]})" if opp[2] else ""
                 return f"{at} {opp[0]}{extra}"
             nxt[canon(a[0])] = label(a, b)
@@ -417,13 +419,7 @@ def fetch_ap():
     if not poll:
         raise ValueError("AP poll not in ESPN feed.")
     week = int((poll.get("occurrence") or {}).get("number") or 0)
-    recs, nxt = {}, {}
-    for w in (week, week + 1, week - 1):
-        if w < 1:
-            continue
-        r, n = scoreboard_index(w)
-        recs.update(r)
-        nxt.update(n)
+    recs, nxt = scoreboard_index(week)
 
     def rows_from(items, start_rank=None):
         out = []
@@ -865,6 +861,80 @@ class Handler(BaseHTTPRequestHandler):
     def _api_get(self, path, qs):
         if path == "/api/export":
             return self._export(qs)
+        if path == "/api/week-view":
+            week = int((qs.get("week") or ["5"])[0] or 5)
+            conn = db()
+            try:
+                live = None
+                row = conn.execute("SELECT v FROM meta WHERE k=?", (f"poll_w{week}",)).fetchone()
+                if row:
+                    live = json.loads(row["v"])
+                recs, nxt = scoreboard_index(week)
+                if live and live.get("ranks"):
+                    ranks = []
+                    for item in live["ranks"]:
+                        if isinstance(item, list):
+                            name = item[1] if len(item) > 1 else ""
+                            rank = item[0] if item else 0
+                            rec = recs.get(canon(name), item[2] if len(item) > 2 else "")
+                            nxtg = nxt.get(canon(name), "")
+                            ranks.append([rank, name, rec, nxtg or "BYE / off week"])
+                        else:
+                            name = item.get("name") or ""
+                            ranks.append([
+                                item.get("rank"),
+                                name,
+                                recs.get(canon(name), item.get("record") or ""),
+                                nxt.get(canon(name), "") or "BYE / off week",
+                            ])
+                    live = {**live, "week": week, "ranks": ranks, "headline": live.get("headline") or f"AP poll week {week}"}
+                else:
+                    off = None
+                    # no stored poll for this week
+                    live = {
+                        "week": week,
+                        "headline": f"No AP poll stored for week {week} — week {week} schedule",
+                        "ranks": [[i, name, recs.get(k, ""), nxt.get(k, "")] for i, (k, name) in enumerate(
+                            # can't easily invert canon; just list schedule teams
+                            [], start=1
+                        )],
+                    }
+                    sched = []
+                    i = 1
+                    seen = set()
+                    # rebuild from nxt keys using scoreboard names inside nxt values
+                    data = None
+                    try:
+                        data = http_json(f"{ESPN_SCOREBOARD}?week={week}&seasontype=2&limit=300")
+                    except Exception:
+                        data = {}
+                    for ev in data.get("events") or []:
+                        comps = (ev.get("competitions") or [{}])[0]
+                        teams = comps.get("competitors") or []
+                        if len(teams) < 2:
+                            continue
+                        names = []
+                        recs2 = []
+                        for c in teams:
+                            team = c.get("team") or {}
+                            nm = team.get("shortDisplayName") or team.get("nickname") or ""
+                            rec = ""
+                            for recrow in c.get("records") or []:
+                                if recrow.get("type") == "total":
+                                    rec = recrow.get("summary") or ""
+                            names.append(nm)
+                            recs2.append(rec)
+                        if len(names) == 2:
+                            sched.append([i, names[0], recs2[0], nxt.get(canon(names[0]), f"vs {names[1]}")])
+                            i += 1
+                            sched.append([i, names[1], recs2[1], nxt.get(canon(names[1]), f"vs {names[0]}")])
+                            i += 1
+                    live["ranks"] = sched
+                return self._json(200, {"week": week, "poll": live})
+            except Exception as e:
+                return self._json(400, {"error": str(e)})
+            finally:
+                conn.close()
         if path == "/api/health":
             return self._json(200, {"ok": True, "service": "U-RankEm", "db": "postgres" if USE_PG else "sqlite"})
         if path == "/api/poll":
