@@ -94,7 +94,16 @@ function weekBar(){
   html+=` <span class="chip">Open ballot: week ${open}</span></div>`;
   return html;
 }
-function pickWeek(n){ S.week=n; render(); }
+async function pickWeek(n){
+  S.week=n;
+  try{
+    const data=await api("/api/week-view?week="+n);
+    S.snap=S.snap||{};
+    S.snap.polls=S.snap.polls||{};
+    if(data.poll) S.snap.polls[String(n)]=data.poll;
+  }catch(e){}
+  render();
+}
 function ballotsFor(week){
   const key=String(week);
   if(S.snap.ballots_by_week&&S.snap.ballots_by_week[key]) return S.snap.ballots_by_week[key];
