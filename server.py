@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import smtplib
 import sqlite3
 import threading
 import urllib.request
@@ -12,6 +13,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from email.message import EmailMessage
 
 try:
     import psycopg2
@@ -288,6 +290,27 @@ def now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
+def gmail_ready():
+    return bool(os.environ.get("GMAIL_USER") and os.environ.get("GMAIL_APP_PASSWORD"))
+
+
+def send_gmail(to, subject, body):
+    user = os.environ.get("GMAIL_USER") or ""
+    pw = os.environ.get("GMAIL_APP_PASSWORD") or ""
+    if not user or not pw:
+        raise ValueError("Gmail is not configured on the server yet.")
+    if not to:
+        raise ValueError("No host email saved.")
+    msg = EmailMessage()
+    msg["From"] = user
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(body)
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
+        smtp.login(user, pw)
+        smtp.send_message(msg)
+
+
 def score_slot(pick, actual):
     if actual is None or actual > 20:
         return {"pts": -(20 - pick), "type": "dropped", "note": f"Out of Top 20: -{20 - pick}"}
@@ -495,7 +518,6 @@ def apply_published_poll(conn, live):
         "INSERT INTO meta(k,v) VALUES('last_poll',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
         (json.dumps(live),),
     )
-    conn.execute("UPDATE pools SET target_week=?", (week + 1,))
     conn.commit()
     return {"poll": live, "week": week, "scored": scored}
 
@@ -704,14 +726,15 @@ class Handler(BaseHTTPRequestHandler):
         ]
         week = pool["target_week"]
         ballots = {}
+        ballots_by_week = {}
         for r in conn.execute(
-            "SELECT player_id, teams, submitted FROM ballots WHERE pool_id=? AND week=?",
-            (pool["id"], week),
+            "SELECT player_id, week, teams, submitted FROM ballots WHERE pool_id=?",
+            (pool["id"],),
         ):
-            ballots[r["player_id"]] = {
-                "teams": json.loads(r["teams"]),
-                "submitted": r["submitted"],
-            }
+            item = {"teams": json.loads(r["teams"]), "submitted": r["submitted"]}
+            ballots_by_week.setdefault(str(r["week"]), {})[r["player_id"]] = item
+            if r["week"] == week:
+                ballots[r["player_id"]] = item
         official = conn.execute(
             "SELECT week, ranks FROM official WHERE pool_id=? ORDER BY week",
             (pool["id"],),
@@ -774,6 +797,7 @@ class Handler(BaseHTTPRequestHandler):
             "report": dict(report) if report else None,
             "players": players,
             "ballots": ballots,
+            "ballots_by_week": ballots_by_week,
             "official": official_out,
             "scores": scores,
             "season": season_list,
@@ -913,6 +937,8 @@ class Handler(BaseHTTPRequestHandler):
                 if len(set(teams)) != 20:
                     raise ValueError("Each team only once.")
                 week = int(body.get("week") or pool["target_week"])
+                if week != int(pool["target_week"]):
+                    raise ValueError(f"Open ballot is week {pool['target_week']}. Host must change the open week to submit a different week.")
                 conn.execute(
                     """INSERT INTO ballots(pool_id,player_id,week,teams,submitted)
                        VALUES(?,?,?,?,?)
@@ -947,6 +973,45 @@ class Handler(BaseHTTPRequestHandler):
                        ON CONFLICT(pool_id,week) DO UPDATE SET ranks=excluded.ranks""",
                     (pool["id"], week, json.dumps(cleaned)),
                 )
+                conn.commit()
+                pool = conn.execute("SELECT * FROM pools WHERE id=?", (pool["id"],)).fetchone()
+                return self._json(200, {"ok": True, "snapshot": self._snapshot(conn, pool)})
+
+            if path == "/api/email-report":
+                pool = self._pool(conn, body.get("code") or "")
+                player = self._player(conn, pool["id"], body.get("name") or "", body.get("pin") or "")
+                if not player["is_host"]:
+                    raise ValueError("Only the host can email the report.")
+                to = (body.get("email") or pool["host_email"] or "").strip()
+                text = ""
+                rep = conn.execute("SELECT week, text FROM reports WHERE pool_id=? ORDER BY week DESC LIMIT 1", (pool["id"],)).fetchone()
+                if rep:
+                    text = rep["text"]
+                else:
+                    text = "No week scored yet."
+                send_gmail(to, f"U-RankEm {pool['name']}", text)
+                return self._json(200, {"ok": True, "to": to})
+
+            if path == "/api/set-week":
+                pool = self._pool(conn, body.get("code") or "")
+                player = self._player(conn, pool["id"], body.get("name") or "", body.get("pin") or "")
+                if not player["is_host"]:
+                    raise ValueError("Only the host can change the open week.")
+                week = int(body.get("week") or 5)
+                if week < 1 or week > 16:
+                    raise ValueError("Week must be 1 to 16.")
+                conn.execute("UPDATE pools SET target_week=? WHERE id=?", (week, pool["id"]))
+                conn.commit()
+                pool = conn.execute("SELECT * FROM pools WHERE id=?", (pool["id"],)).fetchone()
+                return self._json(200, {"ok": True, "snapshot": self._snapshot(conn, pool)})
+
+            if path == "/api/host-email":
+                pool = self._pool(conn, body.get("code") or "")
+                player = self._player(conn, pool["id"], body.get("name") or "", body.get("pin") or "")
+                if not player["is_host"]:
+                    raise ValueError("Only the host can set the host email.")
+                email = (body.get("email") or "").strip()
+                conn.execute("UPDATE pools SET host_email=? WHERE id=?", (email, pool["id"]))
                 conn.commit()
                 pool = conn.execute("SELECT * FROM pools WHERE id=?", (pool["id"],)).fetchone()
                 return self._json(200, {"ok": True, "snapshot": self._snapshot(conn, pool)})
