@@ -76,6 +76,10 @@ function pollFor(week){
   return {week:+w,headline:"No stored poll for week "+w,ranks:[]};
 }
 function ranks(){ return pollFor(viewedWeek()).ranks||[]; }
+function livePollRanks(){
+  const live=(S.snap&&S.snap.poll)||S.poll||{};
+  return live.ranks||[];
+}
 function teamName(row){ return Array.isArray(row)?row[1]:row.name; }
 function teamRec(row){ return Array.isArray(row)?row[2]:row.record||""; }
 function teamNext(row){ return Array.isArray(row)?row[3]:row.next||""; }
@@ -375,10 +379,24 @@ function bind(){
   if(saveB) saveB.onclick=submitBallot;
   const copy20=document.getElementById("copy20");
   if(copy20) copy20.onclick=()=>{
-    ranks().slice(0,20).forEach((r,i)=>{const s=document.querySelector(`select[data-i="${i}"]`); if(s) s.value=teamName(r);});
+    const src=livePollRanks().slice(0,20);
+    if(!src.length){ flash("No live AP poll loaded. Use Check AP poll first.","err"); return; }
+    src.forEach((r,i)=>{
+      const s=document.querySelector(`select[data-i="${i}"]`);
+      if(!s) return;
+      const name=teamName(r);
+      const hit=[...s.options].find(o=>o.text===name||o.value===name);
+      if(hit) s.value=hit.value;
+      else { s.value=name; }
+    });
+    flash("Filled from the latest published AP Top 20.");
   };
   const clearB=document.getElementById("clearB");
-  if(clearB) clearB.onclick=()=>document.querySelectorAll("select[data-i]").forEach(s=>s.value="");
+  if(clearB) clearB.onclick=e=>{
+    e.preventDefault();
+    document.querySelectorAll("select[data-i]").forEach(s=>{ s.selectedIndex=0; s.value=""; });
+    flash("Ballot cleared.");
+  };
   const saveOff=document.getElementById("saveOff");
   if(saveOff) saveOff.onclick=saveOfficial;
   const scoreNow=document.getElementById("scoreNow");
