@@ -495,6 +495,7 @@ def apply_published_poll(conn, live):
         "INSERT INTO meta(k,v) VALUES('last_poll',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
         (json.dumps(live),),
     )
+    conn.execute("UPDATE pools SET target_week=?", (week + 1,))
     conn.commit()
     return {"poll": live, "week": week, "scored": scored}
 
@@ -946,7 +947,6 @@ class Handler(BaseHTTPRequestHandler):
                        ON CONFLICT(pool_id,week) DO UPDATE SET ranks=excluded.ranks""",
                     (pool["id"], week, json.dumps(cleaned)),
                 )
-                conn.execute("UPDATE pools SET target_week=? WHERE id=?", (week + 1, pool["id"]))
                 conn.commit()
                 pool = conn.execute("SELECT * FROM pools WHERE id=?", (pool["id"],)).fetchone()
                 return self._json(200, {"ok": True, "snapshot": self._snapshot(conn, pool)})
