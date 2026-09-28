@@ -330,10 +330,15 @@ function standingsView(){
 }
 function hostView(){
   if(!S.session.is_host) return `<p class="muted">Host only.</p>`;
-  const list=ranks().slice(0,25).map(r=>teamRank(r)+". "+teamName(r)).join("\n");
-  const week=S.snap.pool.target_week;
+  const week=S.week||S.snap.pool.target_week;
+  const p=pollFor(week);
+  const bad=!p.ranks||!p.ranks.length||(p.headline||"").indexOf("No AP")===0||(p.headline||"").indexOf("schedule")>=0;
+  const list=bad?"":p.ranks.slice(0,25).map(r=>teamRank(r)+". "+teamName(r)).join("\n");
+  const ballots=ballotsFor(week);
+  const names={}; (S.snap.players||[]).forEach(pl=>names[pl.id]=pl.name);
   return `
   <p class="kicker">Host desk</p>
+  ${weekBar()}
   <h1>Score and publish</h1>
   <div class="card">
     <h2>Invite</h2>
@@ -361,8 +366,12 @@ function hostView(){
       <button id="saveHostEmail">Save host email</button></div>`:'<p class="muted">No week scored yet. Ballots are waiting for the next AP poll.</p>'}
   </div>
   <div class="card">
+    <h2>Ballots submitted for week ${week}</h2>
+    ${Object.keys(ballots).length?`<table><thead><tr><th>Player</th><th>Ballot</th></tr></thead><tbody>${Object.entries(ballots).map(([id,b])=>`<tr><td>${names[id]||id}</td><td>${(b.teams||[]).map((t,i)=>(i+1)+". "+t).join(" · ")}</td></tr>`).join("")}</tbody></table>`:'<p class="muted">No ballots stored as week '+week+'. Try the week number on each scored card (your 55-pt card is week 5).</p>'}
+  </div>
+  <div class="card">
     <h2>Official AP Top 20 for week <input id="offWeek" type="number" value="${week}" style="width:70px"></h2>
-    <p class="muted">Monday after the poll posts, paste 20 teams. Then Score. Scoring uses 1–20 only.</p>
+    <p class="muted">${bad?"No AP list stored for this week yet. Click Check AP poll for the current week, or paste the 1–20 below.":(p.headline||"")}</p>
     <textarea id="offText" style="width:100%;min-height:220px">${list}</textarea>
     <div class="row" style="margin-top:10px">
       <button id="saveOff">Save official poll</button>
