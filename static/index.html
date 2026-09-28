@@ -47,7 +47,7 @@ code{font-family:ui-monospace,Consolas,monospace;background:#0e130d;padding:2px 
 <main class="wrap" id="app"></main>
 <script>
 const POLL_FALLBACK = {week:4,headline:"AP Top 25 — Week 4",ranks:[]};
-let S = {view:"home", session:null, snap:null, poll:null};
+let S = {view:"home", session:null, snap:null, poll:null, week:5};
 
 function flash(msg, kind="ok"){
   const d=document.createElement("div");
@@ -71,10 +71,31 @@ function teamRec(row){ return Array.isArray(row)?row[2]:row.record||""; }
 function teamNext(row){ return Array.isArray(row)?row[3]:row.next||""; }
 function teamRank(row){ return Array.isArray(row)?row[0]:row.rank; }
 
+
+function weekBar(){
+  const open=S.snap.pool.target_week;
+  const w=S.week||open;
+  let html='<div class="row" style="margin:8px 0 4px">';
+  html+='<span class="muted">Week</span>';
+  for(let i=1;i<=16;i++){
+    const on=i===w?'primary':'ghost';
+    html+=`<button class="${on}" onclick="pickWeek(${i})">${i}</button>`;
+  }
+  html+=` <span class="chip">Open ballot: week ${open}</span></div>`;
+  return html;
+}
+function pickWeek(n){ S.week=n; render(); }
+function ballotsFor(week){
+  const key=String(week);
+  if(S.snap.ballots_by_week&&S.snap.ballots_by_week[key]) return S.snap.ballots_by_week[key];
+  if(week===S.snap.pool.target_week) return S.snap.ballots||{};
+  return {};
+}
 function render(){
   document.getElementById("nav").innerHTML = S.session ? `
     <span class="chip">${S.session.player}${S.session.is_host?" · host":""}</span>
     <span class="chip">Pool ${S.session.code}</span>
+    <span class="chip">Viewing week ${S.week||S.snap.pool.target_week}</span>
     <button class="ghost" onclick="go('board')">Board</button>
     <button class="ghost" onclick="go('ballot')">Ballot</button>
     <button class="ghost" onclick="go('mine')">My card</button>
@@ -126,10 +147,11 @@ function home(){
   </div>`;
 }
 function boardView(){
-  const p=S.snap.pool, players=S.snap.players||[], week=p.target_week;
+  const p=S.snap.pool, players=S.snap.players||[], week=S.week||p.target_week;
   const poll=ranks();
   return `
   <p class="kicker">${p.name}</p>
+  ${weekBar()}
   <h1>Pool board</h1>
   <div><span class="chip">Code <b class="invite">${p.code}</b></span>
        <span class="chip">Predicting week ${week}</span>
@@ -145,7 +167,7 @@ function boardView(){
       <h2>Players</h2>
       <table><thead><tr><th>Name</th><th>Week ${week} ballot</th></tr></thead>
       <tbody>${players.map(pl=>{
-        const b=S.snap.ballots[pl.id];
+        const b=ballotsFor(week)[pl.id];
         return `<tr><td>${pl.name}${pl.is_host?" · host":""}</td><td>${b?'<span class="chip">submitted</span>':'<span class="muted">open</span>'}</td></tr>`;
       }).join("")||'<tr><td colspan="2" class="muted">None yet</td></tr>'}</tbody></table>
       <div class="row" style="margin-top:12px">
@@ -163,16 +185,21 @@ function ballotView(){
   const seen=new Set(); const teams=[];
   names.forEach(n=>{if(n&&!seen.has(n)){seen.add(n);teams.push(n);}});
   const me=S.snap.players.find(p=>p.name===S.session.player);
-  const cur=(me&&S.snap.ballots[me.id]&&S.snap.ballots[me.id].teams)||[];
-  const opts=teams.map(t=>`<option>${t}</option>`).join("");
+  const week=S.week||S.snap.pool.target_week;
+  const cur=(me&&ballotsFor(week)[me.id]&&ballotsFor(week)[me.id].teams)||[];
+  const open=S.snap.pool.target_week;
+  const locked=week!==open;
+  const scored=!!(S.snap.scores&&S.snap.scores[String(week)]);
   return `
-  <p class="kicker">Due Saturday 11:00 AM ET</p>
-  <h1>Week ${S.snap.pool.target_week} ballot</h1>
-  <p class="lede">${S.session.player} — save any time, then submit. Host sees the submitted list, not your drafts on another phone.</p>
+  <p class="kicker">${locked?"Viewing a closed week":"Due Saturday 11:00 AM ET"}</p>
+  ${weekBar()}
+  <h1>Week ${week} ballot</h1>
+  <p class="lede">${locked?("Open card is week "+open+". This week is view-only."):(S.session.player+" — save and submit for week "+open+".")}</p>
+  ${scored?'<p class="muted">This week is already scored.</p>':''}
   <div class="row">
-    <button type="button" id="copy20">Start from current Top 20</button>
-    <button type="button" id="clearB">Clear</button>
-    <button class="primary" id="saveB">Save and submit</button>
+    <button type="button" id="copy20" ${locked?"disabled":""}>Start from current Top 20</button>
+    <button type="button" id="clearB" ${locked?"disabled":""}>Clear</button>
+    <button class="primary" id="saveB" ${locked?"disabled":""}>Save and submit</button>
   </div>
   <div class="card">
     <table>
@@ -204,13 +231,14 @@ function mineView(){
     if(row) mine.push({week:w, ...row});
   });
   const season=(S.snap.season||[]).find(r=>r.player_id===me.id);
-  const ballot=S.snap.ballots[me.id];
+  const week=S.week||S.snap.pool.target_week;
+  const ballot=ballotsFor(week)[me.id];
   return `
   <p class="kicker">${S.session.player}</p>
-  <h1>My card</h1>
+  ${weekBar()}<h1>My card</h1>
   <p class="lede">${season?("Season "+season.pts+" pts · "+season.wins+" week win(s)"):"No scored weeks yet."}</p>
   <div class="card">
-    <h2>This week's ballot (week ${S.snap.pool.target_week})</h2>
+    <h2>Ballot for week ${week}</h2>
     ${ballot?`<ol>${ballot.teams.map(t=>`<li>${t}</li>`).join("")}</ol><p class="muted">Submitted ${ballot.submitted}</p>`:'<p class="muted">Not submitted yet.</p>'}
   </div>
   ${mine.map(r=>`<div class="card"><h2>Week ${r.week} — ${r.total} pts, ${r.exact} exact</h2>
@@ -219,17 +247,17 @@ function mineView(){
 }
 function standingsView(){
   const scores=S.snap.scores||{};
-  const weeks=Object.keys(scores).sort((a,b)=>+b-+a);
-  const latest=weeks[0];
-  const weekRows=(scores[latest]||[]).slice().sort((a,b)=>b.total-a.total);
+  const week=S.week||S.snap.pool.target_week;
+  const weekRows=(scores[String(week)]||[]).slice().sort((a,b)=>b.total-a.total);
   const names={}; (S.snap.players||[]).forEach(p=>names[p.id]=p.name);
   const winner=weekRows[0];
   return `
   <p class="kicker">${S.snap.pool.name}</p>
+  ${weekBar()}
   <h1>Standings</h1>
   <div class="grid">
     <div class="card">
-      <h2>${latest?("Week "+latest+" winner"):"This week"}</h2>
+      <h2>Week ${week} ${weekRows.length?"winner":""}</h2>
       ${!weekRows.length?'<p class="muted">Host scores after the AP poll posts Monday.</p>':
         `<p class="lede">${names[winner.player_id]||"?"} — <b class="num">${winner.total}</b> pts</p>
          <table><thead><tr><th>#</th><th>Player</th><th>Pts</th><th>Exact</th></tr></thead>
@@ -260,6 +288,9 @@ function hostView(){
     <p class="muted">Send friends: ${location.origin}/?pool=${S.snap.pool.code}</p>
   </div>
   <div class="card">
+    <h2>Open ballot week</h2>
+    <p class="muted">Players fill this week. Today that should be 5. Auto-advance is off so it will not jump to 6.</p>
+    <div class="row"><button id="setW1" onclick="setOpenWeek(1)">1</button><button id="setW2" onclick="setOpenWeek(2)">2</button><button id="setW3" onclick="setOpenWeek(3)">3</button><button id="setW4" onclick="setOpenWeek(4)">4</button><button id="setW5" onclick="setOpenWeek(5)">5</button><button id="setW6" onclick="setOpenWeek(6)">6</button><button id="setW7" onclick="setOpenWeek(7)">7</button><button id="setW8" onclick="setOpenWeek(8)">8</button><button id="setW9" onclick="setOpenWeek(9)">9</button><button id="setW10" onclick="setOpenWeek(10)">10</button><button id="setW11" onclick="setOpenWeek(11)">11</button><button id="setW12" onclick="setOpenWeek(12)">12</button><button id="setW13" onclick="setOpenWeek(13)">13</button><button id="setW14" onclick="setOpenWeek(14)">14</button><button id="setW15" onclick="setOpenWeek(15)">15</button><button id="setW16" onclick="setOpenWeek(16)">16</button></div>
     <h2>Automatic scoring</h2>
     <p class="muted">The site reads the published AP poll. When a new week posts (usually Sunday night / Monday), every submitted ballot is scored. Open this page or tap the button below.</p>
     <div class="row">
@@ -270,8 +301,11 @@ function hostView(){
       <pre style="white-space:pre-wrap;font-family:system-ui">${S.snap.report.text}</pre>
       <div class="row">
         <button id="copyRep2">Copy report</button>
-        ${S.snap.pool.host_email?`<a class="chip" href="mailto:${S.snap.pool.host_email}?subject=${encodeURIComponent('U-RankEm week '+S.snap.report.week)}&body=${encodeURIComponent(S.snap.report.text)}">Email this report to the host</a>`:''}
-      </div>`:'<p class="muted">No week scored yet. Ballots are waiting for the next AP poll.</p>'}
+        <button id="mailHost">Email report via Gmail</button>
+      </div>
+      <p class="muted">This website cannot send mail by itself. This button copies the report, downloads the spreadsheet, and opens Gmail if a host email is saved.</p>
+      <div class="row"><input id="hostEmailEdit" type="email" placeholder="Host email" value="${S.snap.pool.host_email||""}">
+      <button id="saveHostEmail">Save host email</button></div>`:'<p class="muted">No week scored yet. Ballots are waiting for the next AP poll.</p>'}
   </div>
   <div class="card">
     <h2>Official AP Top 20 for week <input id="offWeek" type="number" value="${week}" style="width:70px"></h2>
@@ -340,6 +374,22 @@ function bind(){
     const t=(S.snap.report&&S.snap.report.text)||reportText();
     navigator.clipboard.writeText(t).then(()=>flash("Report copied.")).catch(()=>flash(t));
   };
+  const mailHost=document.getElementById("mailHost");
+  if(mailHost) mailHost.onclick=async()=>{
+    const to=(document.getElementById("hostEmailEdit")||{}).value||S.snap.pool.host_email||"";
+    try{
+      const out=await api("/api/email-report",{...S.session, email:to});
+      flash("Report emailed to "+out.to);
+    }catch(err){ flash(err.message,"err"); }
+  };
+  const saveHostEmail=document.getElementById("saveHostEmail");
+  if(saveHostEmail) saveHostEmail.onclick=async()=>{
+    const email=(document.getElementById("hostEmailEdit")||{}).value||"";
+    try{
+      const data=await api("/api/host-email",{...S.session, email});
+      S.snap=data.snapshot; flash("Host email saved."); render();
+    }catch(err){ flash(err.message,"err"); }
+  };
   const tickNow=document.getElementById("tickNow");
   if(tickNow) tickNow.onclick=checkPoll;
   const dl=document.getElementById("dlXlsx");
@@ -363,8 +413,10 @@ async function checkPoll(){
 async function submitBallot(){
   const teams=[...document.querySelectorAll("select[data-i]")].map(s=>s.value);
   try{
-    const data=await api("/api/ballot",{...S.session, teams, week:S.snap.pool.target_week});
-    S.snap=data.snapshot; S.view="board"; render(); flash("Ballot submitted.");
+    const week=S.week||S.snap.pool.target_week;
+    if(week!==S.snap.pool.target_week) throw new Error("Switch to the open week to submit. Open week is "+S.snap.pool.target_week+".");
+    const data=await api("/api/ballot",{...S.session, teams, week});
+    S.snap=data.snapshot; S.view="board"; render(); flash("Week "+week+" ballot submitted.");
   }catch(err){ flash(err.message,"err"); }
 }
 async function saveOfficial(){
@@ -399,6 +451,12 @@ function signOut(){
   S.session=null; S.snap=null; S.view="home";
   render();
 }
+async function setOpenWeek(n){
+  try{
+    const data=await api("/api/set-week",{...S.session, week:n});
+    S.snap=data.snapshot; S.week=n; render(); flash("Open ballot is week "+n);
+  }catch(err){ flash(err.message,"err"); }
+}
 function go(view){ S.view=view; render(); }
 
 (async function boot(){
@@ -415,7 +473,7 @@ function go(view){ S.view=view; render(); }
   if(saved&&saved.code){
     try{
       const data=await api("/api/signin", saved);
-      S.session=saved; S.session.is_host=data.is_host; S.snap=data.snapshot; S.view="board";
+      S.session=saved; S.session.is_host=data.is_host; S.snap=data.snapshot; S.week=data.snapshot.pool.target_week; S.view="board";
     }catch(e){ localStorage.removeItem("urankem_sess"); }
   }
   render();
