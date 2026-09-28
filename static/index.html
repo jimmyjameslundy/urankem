@@ -358,7 +358,7 @@ function bind(){
     const f=new FormData(j);
     const code=(f.get("code")||"").toUpperCase();
     try{
-      const data=await api("/api/pools/"+encodeURIComponent(code)+"/join",{name:f.get("name"),pin:f.get("pin"),email:f.get("email")});
+      const data=await api("/api/pools/"+encodeURIComponent(code)+"/join",{code:code,name:f.get("name"),pin:f.get("pin"),email:f.get("email")});
       enter(data, f.get("pin")); flash("You're in "+data.code);
     }catch(err){ flash(err.message,"err"); }
   };
