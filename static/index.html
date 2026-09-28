@@ -278,14 +278,21 @@ function mineView(){
   });
   const season=(S.snap.season||[]).find(r=>r.player_id===me.id);
   const week=S.week||S.snap.pool.target_week;
-  const ballot=ballotsFor(week)[me.id];
+  const byw=S.snap.ballots_by_week||{};
+  const myBallots=[];
+  Object.keys(byw).sort((a,b)=>+a-+b).forEach(w=>{
+    if(byw[w][me.id]) myBallots.push({week:w, ...byw[w][me.id]});
+  });
+  const ballot=ballotsFor(week)[me.id] || (byw[String(week)]&&byw[String(week)][me.id]);
+  const nearby=myBallots.filter(b=>+b.week===+week || +b.week===+week+1 || +b.week===+week-1);
   return `
   <p class="kicker">${S.session.player}</p>
   ${weekBar()}<h1>My card</h1>
-  <p class="lede">${season?("Season "+season.pts+" pts · "+season.wins+" week win(s)"):"No scored weeks yet."}</p>
+  <p class="lede">${season?("Season "+season.pts+" pts · "+season.wins+" week win(s)"):"No scored weeks yet."} Ballots are stored by AP poll week (the poll they predicted).</p>
   <div class="card">
-    <h2>Ballot for week ${week}</h2>
-    ${ballot?`<ol>${ballot.teams.map(t=>`<li>${t}</li>`).join("")}</ol><p class="muted">Submitted ${ballot.submitted}</p>`:'<p class="muted">Not submitted yet.</p>'}
+    <h2>${ballot?("Ballot stored as AP week "+week):(nearby.length?("No card labeled week "+week):("No ballot for week "+week))}</h2>
+    ${ballot?`<ol>${ballot.teams.map(t=>`<li>${t}</li>`).join("")}</ol><p class="muted">Submitted ${ballot.submitted}</p>`:nearby.length?`<p class="muted">You do have ${nearby.map(b=>"week "+b.week).join(" and ")} saved. Your scored card in the picture is week 5 — click 5 above.</p>`:'<p class="muted">Not submitted under this week number.</p>'}
+    ${myBallots.length?`<p class="muted">All your submitted weeks: ${myBallots.map(b=>b.week).join(", ")}</p>`:''}
   </div>
   ${mine.map(r=>`<div class="card"><h2>Week ${r.week} — ${r.total} pts, ${r.exact} exact</h2>
     <table><thead><tr><th>Pick</th><th>Team</th><th>Actual</th><th>Note</th><th>Pts</th></tr></thead>
