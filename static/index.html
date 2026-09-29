@@ -138,6 +138,8 @@ function ballotsFor(week){
   return {};
 }
 function render(){
+  try{
+  if(S.session && !S.snap){ S.session=null; S.view="home"; }
   document.getElementById("nav").innerHTML = S.session ? `
     <span class="chip">${S.session.player}${S.session.is_host?" · host":""}</span>
     <span class="chip">Pool ${S.session.code}</span>
@@ -156,6 +158,10 @@ function render(){
   else if(S.view==="host") app.innerHTML = hostView();
   else app.innerHTML = boardView();
   bind();
+  }catch(err){
+    console.error(err);
+    document.getElementById("app").innerHTML = '<div class="card"><h2>Page error</h2><p class="muted">'+String(err)+'</p><p><button onclick="signOut()">Back to home</button></p></div>';
+  }
 }
 function home(){
   const q=new URLSearchParams(location.search).get("pool")||"";
@@ -215,7 +221,8 @@ function boardView(){
       <tbody>${players.map(pl=>{
         const b=ballotsFor(week)[pl.id];
         const canKick=S.session.is_host && !pl.is_host;
-        return `<tr><td>${pl.name}${pl.is_host?" · host":""}</td><td>${b?'<span class="chip">submitted</span>':'<span class="muted">open</span>'}</td><td>${canKick?`<button onclick="removePlayer(${pl.id},'${pl.name.replace(/'/g,"")}');">Remove</button>`:""}</td></tr>`;
+        const kick=canKick?('<button type="button" onclick="removePlayer('+pl.id+')">Remove</button>'):'';
+        return '<tr><td>'+pl.name+(pl.is_host?' · host':'')+'</td><td>'+(b?'<span class="chip">submitted</span>':'<span class="muted">open</span>')+'</td><td>'+kick+'</td></tr>';
       }).join("")||'<tr><td colspan="2" class="muted">None yet</td></tr>'}</tbody></table>
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="go('ballot')">Fill my ballot</button>
@@ -536,12 +543,14 @@ function signOut(){
   render();
 }
 async function removePlayer(id, label){
+  const pl=(S.snap.players||[]).find(p=>p.id===id);
+  label=label||(pl&&pl.name)||("player "+id);
   if(!confirm("Remove "+label+" from this pool? Their ballots and scores for this pool will be deleted.")) return;
   try{
     const data=await api("/api/remove-player",{...S.session, player_id:id});
     S.snap=data.snapshot; render(); flash(label+" removed.");
   }catch(err){ flash(err.message,"err"); }
-}A
+}
 async function setOpenWeek(n){
   try{
     const data=await api("/api/set-week",{...S.session, week:n});
