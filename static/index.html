@@ -367,12 +367,14 @@ function hostView(){
   </div>
   <div class="card">
     <h2>Ballots submitted for week ${week}</h2>
-    ${Object.keys(ballots).length?`<div style="overflow:auto"><table>
-      <thead><tr><th>Player</th>${[...Array(20)].map((_,i)=>`<th class="rk">${i+1}</th>`).join("")}</tr></thead>
-      <tbody>${Object.entries(ballots).map(([id,b])=>{
-        const t=b.teams||[];
-        return `<tr><td>${names[id]||id}</td>${[...Array(20)].map((_,i)=>`<td>${t[i]||""}</td>`).join("")}</tr>`;
-      }).join("")}</tbody></table></div>`:'<p class="muted">No ballots stored as week '+week+'.</p>'}
+    ${(()=>{
+      const ids=Object.keys(ballots);
+      if(!ids.length) return '<p class="muted">No ballots stored as week '+week+'.</p>';
+      return `<div style="overflow:auto"><table>
+        <thead><tr><th>#</th>${ids.map(id=>`<th>${names[id]||id}</th>`).join("")}</tr></thead>
+        <tbody>${[...Array(20)].map((_,i)=>`<tr><td class="rk">${i+1}</td>${ids.map(id=>`<td>${(ballots[id].teams||[])[i]||""}</td>`).join("")}</tr>`).join("")}</tbody>
+      </table></div>`;
+    })()}
   </div>
   <div class="card">
     <h2>Official AP Top 20 for week <input id="offWeek" type="number" value="${week}" style="width:70px"></h2>
