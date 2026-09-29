@@ -211,10 +211,11 @@ function boardView(){
     </div>
     <div class="card">
       <h2>Players</h2>
-      <table><thead><tr><th>Name</th><th>Week ${week} ballot</th></tr></thead>
+      <table><thead><tr><th>Name</th><th>Week ${week} ballot</th><th></th></tr></thead>
       <tbody>${players.map(pl=>{
         const b=ballotsFor(week)[pl.id];
-        return `<tr><td>${pl.name}${pl.is_host?" · host":""}</td><td>${b?'<span class="chip">submitted</span>':'<span class="muted">open</span>'}</td></tr>`;
+        const canKick=S.session.is_host && !pl.is_host;
+        return `<tr><td>${pl.name}${pl.is_host?" · host":""}</td><td>${b?'<span class="chip">submitted</span>':'<span class="muted">open</span>'}</td><td>${canKick?`<button onclick="removePlayer(${pl.id},'${pl.name.replace(/'/g,"")}');">Remove</button>`:""}</td></tr>`;
       }).join("")||'<tr><td colspan="2" class="muted">None yet</td></tr>'}</tbody></table>
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="go('ballot')">Fill my ballot</button>
@@ -534,6 +535,13 @@ function signOut(){
   S.session=null; S.snap=null; S.view="home";
   render();
 }
+async function removePlayer(id, label){
+  if(!confirm("Remove "+label+" from this pool? Their ballots and scores for this pool will be deleted.")) return;
+  try{
+    const data=await api("/api/remove-player",{...S.session, player_id:id});
+    S.snap=data.snapshot; render(); flash(label+" removed.");
+  }catch(err){ flash(err.message,"err"); }
+}A
 async function setOpenWeek(n){
   try{
     const data=await api("/api/set-week",{...S.session, week:n});
