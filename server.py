@@ -1123,6 +1123,29 @@ class Handler(BaseHTTPRequestHandler):
                 send_gmail(to, f"U-RankEm {pool['name']}", text)
                 return self._json(200, {"ok": True, "to": to})
 
+            if path == "/api/remove-player":
+                pool = self._pool(conn, body.get("code") or "")
+                host = self._player(conn, pool["id"], body.get("name") or "", body.get("pin") or "")
+                if not host["is_host"]:
+                    raise ValueError("Only the host can remove a player.")
+                target_id = int(body.get("player_id") or 0)
+                target = conn.execute(
+                    "SELECT * FROM players WHERE id=? AND pool_id=?",
+                    (target_id, pool["id"]),
+                ).fetchone()
+                if not target:
+                    raise ValueError("That player is not in this pool.")
+                if target["id"] == host["id"]:
+                    raise ValueError("You cannot remove yourself. Leave the pool instead.")
+                if target["is_host"]:
+                    raise ValueError("You cannot remove the host.")
+                conn.execute("DELETE FROM scores WHERE pool_id=? AND player_id=?", (pool["id"], target_id))
+                conn.execute("DELETE FROM ballots WHERE pool_id=? AND player_id=?", (pool["id"], target_id))
+                conn.execute("DELETE FROM players WHERE id=? AND pool_id=?", (target_id, pool["id"]))
+                conn.commit()
+                pool = conn.execute("SELECT * FROM pools WHERE id=?", (pool["id"],)).fetchone()
+                return self._json(200, {"ok": True, "snapshot": self._snapshot(conn, pool)})
+
             if path == "/api/set-week":
                 pool = self._pool(conn, body.get("code") or "")
                 player = self._player(conn, pool["id"], body.get("name") or "", body.get("pin") or "")
