@@ -9,7 +9,8 @@ import smtplib
 import sqlite3
 import threading
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -50,6 +51,35 @@ STATIC = ROOT / "static"
 
 WEEK = 4
 TARGET_WEEK = 5
+ET = ZoneInfo("America/New_York")
+# ESPN/CFB 2026 Week 1 Saturday is Sep 5. Deadline is 11:00 AM ET that Saturday.
+WEEK1_SATURDAY = datetime(2026, 9, 5, 11, 0, tzinfo=ET)
+
+
+def week_deadline(week: int) -> datetime:
+    return WEEK1_SATURDAY + timedelta(weeks=max(int(week), 1) - 1)
+
+
+def week_games_started(week: int, now_et: datetime | None = None) -> bool:
+    now_et = now_et or datetime.now(ET)
+    return now_et >= week_deadline(week)
+
+
+def ballot_lock(conn, pool, week):
+    now_et = datetime.now(ET)
+    due = week_deadline(week)
+    if now_et >= due:
+        return True, (
+            f"Week {week} is locked. The deadline was Saturday "
+            f"{due.strftime('%b %d')} at 11:00 AM ET. Games for that week have started or finished."
+        )
+    scored = conn.execute(
+        "SELECT 1 FROM scores WHERE pool_id=? AND week=? LIMIT 1",
+        (pool["id"], week),
+    ).fetchone()
+    if scored:
+        return True, f"Week {week} is locked. Those ballots have already been scored."
+    return False, ""
 DEFAULT_POLL = {
     "week": WEEK,
     "headline": "AP Top 25 — Week 4 (Sep 20, 2026)",
@@ -850,6 +880,11 @@ class Handler(BaseHTTPRequestHandler):
                 "host_email": pool["host_email"] if "host_email" in pool.keys() else "",
                 "target_week": pool["target_week"],
                 "created": pool["created"],
+                "ballot_locked": ballot_lock(conn, pool, pool["target_week"])[0],
+                "ballot_lock_reason": ballot_lock(conn, pool, pool["target_week"])[1],
+                "week_locks": {
+                    str(w): week_games_started(w) for w in range(1, 17)
+                },
             },
             "report": dict(report) if report else None,
             "players": players,
@@ -1074,6 +1109,9 @@ class Handler(BaseHTTPRequestHandler):
                 week = int(body.get("week") or pool["target_week"])
                 if week != int(pool["target_week"]):
                     raise ValueError(f"Open ballot is week {pool['target_week']}. Host must change the open week to submit a different week.")
+                locked, why = ballot_lock(conn, pool, week)
+                if locked:
+                    raise ValueError(why)
                 conn.execute(
                     """INSERT INTO ballots(pool_id,player_id,week,teams,submitted)
                        VALUES(?,?,?,?,?)
