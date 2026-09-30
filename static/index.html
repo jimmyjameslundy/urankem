@@ -394,6 +394,7 @@ function hostView(){
     <div class="row" style="margin-top:10px">
       <button id="saveOff">Save official poll</button>
       <button class="primary" id="scoreNow">Score this week</button>
+      <button id="unscoreNow">Clear this week's scores</button>
       <button id="copyRep">Copy results for the group</button>
     </div>
   </div>`;
@@ -458,6 +459,8 @@ function bind(){
   if(saveOff) saveOff.onclick=saveOfficial;
   const scoreNow=document.getElementById("scoreNow");
   if(scoreNow) scoreNow.onclick=scoreWeek;
+  const unscoreNow=document.getElementById("unscoreNow");
+  if(unscoreNow) unscoreNow.onclick=unscoreWeek;
   const copyRep=document.getElementById("copyRep");
   if(copyRep) copyRep.onclick=()=>{
     const t=(S.snap.report&&S.snap.report.text)||reportText();
@@ -558,6 +561,14 @@ async function setOpenWeek(n){
   try{
     const data=await api("/api/set-week",{...S.session, week:n});
     S.snap=data.snapshot; S.week=n; render(); flash("Open ballot is week "+n);
+  }catch(err){ flash(err.message,"err"); }
+}
+async function unscoreWeek(){
+  const week=parseInt((document.getElementById("offWeek")||{}).value||S.week||S.snap.pool.target_week,10);
+  if(!confirm("Clear scores for week "+week+"? Ballots stay. The AP poll will not auto-score this week again.")) return;
+  try{
+    const data=await api("/api/unscore",{...S.session, week});
+    S.snap=data.snapshot; render(); flash("Week "+week+" scores cleared. Ballots are still submitted.");
   }catch(err){ flash(err.message,"err"); }
 }
 function go(view){ S.view=view; render(); }
