@@ -245,14 +245,15 @@ function ballotView(){
   const week=S.week||S.snap.pool.target_week;
   const cur=(me&&ballotsFor(week)[me.id]&&ballotsFor(week)[me.id].teams)||[];
   const open=S.snap.pool.target_week;
-  const locked=week!==open;
   const scored=!!(S.snap.scores&&S.snap.scores[String(week)]);
+  const timeLock=!!((S.snap.pool.week_locks||{})[String(week)]) || scored || (!!S.snap.pool.ballot_locked && week===open);
+  const locked=week!==open || timeLock;
   return `
-  <p class="kicker">${locked?"Viewing a closed week":"Due Saturday 11:00 AM ET"}</p>
+  <p class="kicker">${timeLock?"Locked — Saturday 11:00 AM ET has passed":(locked?"Viewing a closed week":"Due Saturday 11:00 AM ET")}</p>
   ${weekBar()}
   <h1>Week ${week} ballot</h1>
-  <p class="lede">${locked?("Open card is week "+open+". This week is view-only."):(S.session.player+" — save and submit for week "+open+".")}</p>
-  ${scored?'<p class="muted">This week is already scored.</p>':''}
+  <p class="lede">${timeLock?(S.snap.pool.ballot_lock_reason||"This week's games have started. Ballots cannot be changed."):(locked?("Open card is week "+open+". This week is view-only."):(S.session.player+" — save and submit for week "+open+". Deadline is Saturday 11:00 AM ET."))}</p>
+  ${scored?'<p class="muted">This week is already scored and locked.</p>':''}
   <div class="row">
     <button type="button" id="copy20" onclick="fillCurrentTop20()">Start from current Top 20</button>
     <button type="button" id="clearB" onclick="clearBallotPicks()">Clear</button>
@@ -512,6 +513,8 @@ async function submitBallot(){
   try{
     const week=S.week||S.snap.pool.target_week;
     if(week!==S.snap.pool.target_week) throw new Error("Switch to the open week to submit. Open week is "+S.snap.pool.target_week+".");
+    if(S.snap.pool.week_locks&&S.snap.pool.week_locks[String(week)]) throw new Error("Saturday 11:00 AM ET has passed for this week. Ballots are locked.");
+    if(S.snap.pool.ballot_locked) throw new Error(S.snap.pool.ballot_lock_reason||"Ballots are locked.");
     const data=await api("/api/ballot",{...S.session, teams, week});
     S.snap=data.snapshot; S.view="board"; render(); flash("Week "+week+" ballot submitted.");
   }catch(err){ flash(err.message,"err"); }
