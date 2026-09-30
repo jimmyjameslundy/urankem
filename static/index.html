@@ -200,20 +200,23 @@ function home(){
 }
 function boardView(){
   const p=S.snap.pool, players=S.snap.players||[], week=S.week||p.target_week;
-  const poll=ranks();
+  const scored=!!((S.snap.scores||{})[String(week)]||[]).length;
+  const isOpen=week===p.target_week;
+  const showPoll=scored||isOpen;
+  const poll=showPoll?ranks():[];
   return `
   <p class="kicker">${p.name}</p>
   ${weekBar()}
   <h1>Pool board</h1>
   <div><span class="chip">Code <b class="invite">${p.code}</b></span>
-       <span class="chip">Predicting week ${week}</span>
-       <span class="chip">${pollFor(week).headline||""}</span></div>
+       <span class="chip">${isOpen?("Open ballot week "+week):("Viewing week "+week)}</span>
+       <span class="chip">${showPoll?(pollFor(week).headline||""):"NO DATA"}</span></div>
   <p class="muted">Invite link: <code>${location.origin}/?pool=${p.code}</code></p>
   <div class="grid">
     <div class="card">
-      <h2>Current poll + next game</h2>
-      <table><thead><tr><th>#</th><th>Team</th><th>Rec</th><th>Next</th></tr></thead>
-      <tbody>${poll.map(r=>`<tr><td class="rk">${teamRank(r)}</td><td>${teamName(r)}</td><td>${teamRec(r)}</td><td class="muted">${teamNext(r)}</td></tr>`).join("")}</tbody></table>
+      <h2>${showPoll?(isOpen?"Current poll + next game":("Week "+week+" poll")):"Week "+week}</h2>
+      ${showPoll?`<table><thead><tr><th>#</th><th>Team</th><th>Rec</th><th>Next</th></tr></thead>
+      <tbody>${poll.map(r=>`<tr><td class="rk">${teamRank(r)}</td><td>${teamName(r)}</td><td>${teamRec(r)}</td><td class="muted">${teamNext(r)}</td></tr>`).join("")||'<tr><td colspan="4">NO DATA</td></tr>'}</tbody></table>`:'<p class="lede">NO DATA</p><p class="muted">No scored ballots for this week.</p>'}
     </div>
     <div class="card">
       <h2>Players</h2>
