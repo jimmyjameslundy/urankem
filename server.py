@@ -55,6 +55,14 @@ ET = ZoneInfo("America/New_York")
 # ESPN/CFB 2026 Week 1 Saturday is Sep 5. Deadline is 11:00 AM ET that Saturday.
 WEEK1_SATURDAY = datetime(2026, 9, 5, 11, 0, tzinfo=ET)
 
+# Wikipedia / AP labels: Week 4 poll published Sep 27 after Week 4 games.
+AP_HISTORY = {
+    1: ["Ohio State","Georgia","Notre Dame","Texas","Indiana","Oregon","Miami","LSU","Ole Miss","Texas A&M","Oklahoma","Alabama","Texas Tech","USC","BYU","Penn State","SMU","Tennessee","Washington","Utah","Iowa","Houston","Missouri","Louisville","Virginia"],
+    2: ["Texas","Georgia","Notre Dame","Indiana","Miami","Ohio State","LSU","Ole Miss","Texas A&M","Alabama","BYU","USC","Texas Tech","Penn State","Tennessee","SMU","Utah","Iowa","Michigan","Missouri","Oregon","Houston","Louisville","Oklahoma","Virginia"],
+    3: ["Texas","Georgia","Notre Dame","Ole Miss","Indiana","Miami","Ohio State","Alabama","BYU","LSU","Texas Tech","USC","Penn State","Tennessee","Utah","Louisville","Iowa","Michigan","Missouri","Oregon","Florida","SMU","Texas A&M","Mississippi State","Houston"],
+    4: ["Texas","Georgia","Notre Dame","Miami","Ohio State","Indiana","Alabama","Florida","Ole Miss","BYU","LSU","Texas Tech","Utah","Iowa","Oregon","Mississippi State","Tennessee","USC","Oklahoma State","Houston","SMU","Boise State","UCLA","Kentucky","Missouri"],
+}
+
 
 def week_deadline(week: int) -> datetime:
     return WEEK1_SATURDAY + timedelta(weeks=max(int(week), 1) - 1)
@@ -437,6 +445,26 @@ def scoreboard_index(week):
             nxt[canon(a[0])] = label(a, b)
             nxt[canon(b[0])] = label(b, a)
     return recs, nxt
+
+
+def history_poll(week):
+    names = AP_HISTORY.get(int(week))
+    if not names:
+        return None
+    recs, nxt = scoreboard_index(week)
+    ranks = []
+    for i, name in enumerate(names, 1):
+        ranks.append([
+            i,
+            name,
+            recs.get(canon(name), ""),
+            nxt.get(canon(name), "") or "BYE / off week",
+        ])
+    return {
+        "week": int(week),
+        "headline": f"AP Top 25 — Week {week}",
+        "ranks": ranks,
+    }
 
 
 def fetch_ap():
@@ -872,6 +900,11 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         if poll.get("week"):
             polls.setdefault(str(poll["week"]), poll)
+        for w in AP_HISTORY:
+            if str(w) not in polls:
+                hp = history_poll(w)
+                if hp:
+                    polls[str(w)] = hp
         return {
             "pool": {
                 "code": pool["code"],
@@ -928,47 +961,11 @@ class Handler(BaseHTTPRequestHandler):
                             ])
                     live = {**live, "week": week, "ranks": ranks, "headline": live.get("headline") or f"AP poll week {week}"}
                 else:
-                    off = None
-                    # no stored poll for this week
-                    live = {
+                    live = history_poll(week) or {
                         "week": week,
-                        "headline": f"No AP poll stored for week {week} — week {week} schedule",
-                        "ranks": [[i, name, recs.get(k, ""), nxt.get(k, "")] for i, (k, name) in enumerate(
-                            # can't easily invert canon; just list schedule teams
-                            [], start=1
-                        )],
+                        "headline": f"NO DATA — no AP poll for week {week}",
+                        "ranks": [],
                     }
-                    sched = []
-                    i = 1
-                    seen = set()
-                    # rebuild from nxt keys using scoreboard names inside nxt values
-                    data = None
-                    try:
-                        data = http_json(f"{ESPN_SCOREBOARD}?week={week}&seasontype=2&limit=300")
-                    except Exception:
-                        data = {}
-                    for ev in data.get("events") or []:
-                        comps = (ev.get("competitions") or [{}])[0]
-                        teams = comps.get("competitors") or []
-                        if len(teams) < 2:
-                            continue
-                        names = []
-                        recs2 = []
-                        for c in teams:
-                            team = c.get("team") or {}
-                            nm = team.get("shortDisplayName") or team.get("nickname") or ""
-                            rec = ""
-                            for recrow in c.get("records") or []:
-                                if recrow.get("type") == "total":
-                                    rec = recrow.get("summary") or ""
-                            names.append(nm)
-                            recs2.append(rec)
-                        if len(names) == 2:
-                            sched.append([i, names[0], recs2[0], nxt.get(canon(names[0]), f"vs {names[1]}")])
-                            i += 1
-                            sched.append([i, names[1], recs2[1], nxt.get(canon(names[1]), f"vs {names[0]}")])
-                            i += 1
-                    live["ranks"] = sched
                 return self._json(200, {"week": week, "poll": live})
             except Exception as e:
                 return self._json(400, {"error": str(e)})
