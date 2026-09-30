@@ -531,7 +531,11 @@ def apply_published_poll(conn, live):
             "SELECT 1 FROM ballots WHERE pool_id=? AND week=? LIMIT 1",
             (pool["id"], week),
         ).fetchone()
-        if has_ballots and not already:
+        hold = conn.execute(
+            "SELECT 1 FROM meta WHERE k=?",
+            (f"hold_score_{pool['id']}_{week}",),
+        ).fetchone()
+        if has_ballots and not already and not hold:
             result = score_pool_week(conn, pool, week, official)
             if result:
                 scored.append({"code": pool["code"], "name": pool["name"], **result})
@@ -1170,6 +1174,22 @@ class Handler(BaseHTTPRequestHandler):
                 pool = conn.execute("SELECT * FROM pools WHERE id=?", (pool["id"],)).fetchone()
                 return self._json(200, {"ok": True, "snapshot": self._snapshot(conn, pool)})
 
+            if path == "/api/unscore":
+                pool = self._pool(conn, body.get("code") or "")
+                player = self._player(conn, pool["id"], body.get("name") or "", body.get("pin") or "")
+                if not player["is_host"]:
+                    raise ValueError("Only the host can clear scores.")
+                week = int(body.get("week") or pool["target_week"])
+                conn.execute("DELETE FROM scores WHERE pool_id=? AND week=?", (pool["id"], week))
+                conn.execute("DELETE FROM reports WHERE pool_id=? AND week=?", (pool["id"], week))
+                conn.execute(
+                    "INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                    (f"hold_score_{pool['id']}_{week}", "1"),
+                )
+                conn.commit()
+                pool = conn.execute("SELECT * FROM pools WHERE id=?", (pool["id"],)).fetchone()
+                return self._json(200, {"ok": True, "week": week, "snapshot": self._snapshot(conn, pool)})
+
             if path == "/api/score":
                 pool = self._pool(conn, body.get("code") or "")
                 player = self._player(conn, pool["id"], body.get("name") or "", body.get("pin") or "")
@@ -1191,6 +1211,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not ballots:
                     raise ValueError("No submitted ballots for that week.")
                 conn.execute("DELETE FROM scores WHERE pool_id=? AND week=?", (pool["id"], week))
+                conn.execute("DELETE FROM meta WHERE k=?", (f"hold_score_{pool['id']}_{week}",))
                 results = []
                 for b in ballots:
                     teams = json.loads(b["teams"])
