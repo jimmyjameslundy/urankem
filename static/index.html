@@ -511,10 +511,9 @@ async function checkPoll(){
 async function submitBallot(){
   const teams=[...document.querySelectorAll("select[data-i]")].map(s=>s.value);
   try{
-    const week=S.week||S.snap.pool.target_week;
-        if(S.snap.pool.week_locks&&S.snap.pool.week_locks[String(week)]) throw new Error("Saturday 11:00 AM ET has passed for this week. Ballots are locked.");
-    if(S.snap.pool.ballot_locked) throw new Error(S.snap.pool.ballot_lock_reason||"Ballots are locked.");
-    const data=await api("/api/ballot",{...S.session, teams, week});
+    const week=S.week||S.snap.pool.current_open_week||S.snap.pool.target_week;
+    if((S.snap.pool.week_locks||{})[String(week)]) throw new Error("Saturday 11:00 AM ET has passed for week "+week+". Ballots for that week are locked.");
+    const data=await api("/api/ballot",{...S.session, teams, week:Number(week)});
     S.snap=data.snapshot; S.view="board"; render(); flash("Week "+week+" ballot submitted.");
   }catch(err){ flash(err.message,"err"); }
 }
