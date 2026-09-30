@@ -893,6 +893,14 @@ class Handler(BaseHTTPRequestHandler):
             for pid, v in season.items()
         ]
         season_list.sort(key=lambda x: (-x["pts"], -x["wins"], x["name"]))
+        playable = current_open_week()
+        try:
+            if week_games_started(int(pool["target_week"])) and int(pool["target_week"]) != playable:
+                conn.execute("UPDATE pools SET target_week=? WHERE id=?", (playable, pool["id"]))
+                conn.commit()
+                pool = conn.execute("SELECT * FROM pools WHERE id=?", (pool["id"],)).fetchone()
+        except Exception:
+            pass
         report = conn.execute(
             "SELECT week, text, created FROM reports WHERE pool_id=? ORDER BY week DESC LIMIT 1",
             (pool["id"],),
@@ -922,8 +930,8 @@ class Handler(BaseHTTPRequestHandler):
                 "target_week": pool["target_week"] if not week_games_started(int(pool["target_week"])) else current_open_week(),
                 "current_open_week": current_open_week(),
                 "created": pool["created"],
-                "ballot_locked": ballot_lock(conn, pool, pool["target_week"])[0],
-                "ballot_lock_reason": ballot_lock(conn, pool, pool["target_week"])[1],
+                "ballot_locked": ballot_lock(conn, pool, current_open_week())[0],
+                "ballot_lock_reason": ballot_lock(conn, pool, current_open_week())[1],
                 "week_locks": {
                     str(w): week_games_started(w) for w in range(1, 17)
                 },
