@@ -81,6 +81,25 @@ def current_open_week(now_et: datetime | None = None) -> int:
     return 16
 
 
+def purge_unplayed_scores(conn, pool_id):
+    """Remove scores for weeks whose Saturday kickoff has not happened yet."""
+    open_w = current_open_week()
+    rows = conn.execute(
+        "SELECT DISTINCT week FROM scores WHERE pool_id=?",
+        (pool_id,),
+    ).fetchall() or []
+    for row in rows:
+        w = int(row["week"])
+        if w >= open_w or not week_games_started(w):
+            conn.execute("DELETE FROM scores WHERE pool_id=? AND week=?", (pool_id, w))
+            conn.execute("DELETE FROM reports WHERE pool_id=? AND week=?", (pool_id, w))
+            conn.execute(
+                "INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                (f"hold_score_{pool_id}_{w}", "1"),
+            )
+    conn.commit()
+
+
 def ballot_lock(conn, pool, week):
     now_et = datetime.now(ET)
     due = week_deadline(week)
@@ -570,25 +589,28 @@ def score_pool_week(conn, pool, week, official_ranks):
            ON CONFLICT(pool_id,week) DO UPDATE SET text=excluded.text, created=excluded.created""",
         (pool["id"], week, text, now()),
     )
-    conn.execute(
-        "UPDATE pools SET target_week=? WHERE id=? AND target_week<=?",
-        (week + 1, pool["id"], week),
-    )
     return {"week": week, "players": len(results), "report": text}
 
 
 def apply_published_poll(conn, live):
-    week = live["week"]
+    poll_week = int(live["week"])
     official = live["official"]
-    if week < 1 or len(official) < 20:
+    # Ballots labeled week G are a prediction of the poll AFTER those games.
+    # ESPN "AP Week P" is that post-game poll, so score game-week P-1.
+    week = poll_week - 1
+    if poll_week < 1 or len(official) < 20:
         return {"poll": live, "scored": []}
     scored = []
     for pool in conn.execute("SELECT * FROM pools").fetchall():
         conn.execute(
             """INSERT INTO official(pool_id,week,ranks) VALUES(?,?,?)
                ON CONFLICT(pool_id,week) DO UPDATE SET ranks=excluded.ranks""",
-            (pool["id"], week, json.dumps(official)),
+            (pool["id"], poll_week, json.dumps(official)),
         )
+        if week < 1:
+            continue
+        # Drop premature scores for weeks whose games have not been played yet.
+        purge_unplayed_scores(conn, pool["id"])
         already = conn.execute(
             "SELECT 1 FROM scores WHERE pool_id=? AND week=? LIMIT 1",
             (pool["id"], week),
@@ -601,7 +623,8 @@ def apply_published_poll(conn, live):
             "SELECT 1 FROM meta WHERE k=?",
             (f"hold_score_{pool['id']}_{week}",),
         ).fetchone()
-        if has_ballots and not already and not hold:
+        ready = week_games_started(week) and week < current_open_week()
+        if has_ballots and not already and not hold and ready:
             result = score_pool_week(conn, pool, week, official)
             if result:
                 scored.append({"code": pool["code"], "name": pool["name"], **result})
@@ -611,10 +634,10 @@ def apply_published_poll(conn, live):
     )
     conn.execute(
         "INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-        (f"poll_w{week}", json.dumps(live)),
+        (f"poll_w{poll_week}", json.dumps(live)),
     )
     conn.commit()
-    return {"poll": live, "week": week, "scored": scored}
+    return {"poll": live, "week": poll_week, "scored": scored}
 
 
 def build_workbook(conn, pool):
@@ -824,6 +847,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _snapshot(self, conn, pool):
         try:
+            purge_unplayed_scores(conn, pool["id"])
+        except Exception:
+            pass
+        try:
             player_rows = conn.execute(
                 "SELECT id, name, is_host, email FROM players WHERE pool_id=? ORDER BY name",
                 (pool["id"],),
@@ -895,7 +922,8 @@ class Handler(BaseHTTPRequestHandler):
         season_list.sort(key=lambda x: (-x["pts"], -x["wins"], x["name"]))
         playable = current_open_week()
         try:
-            if week_games_started(int(pool["target_week"])) and int(pool["target_week"]) != playable:
+            tw = int(pool["target_week"])
+            if tw != playable and (week_games_started(tw) or tw > playable):
                 conn.execute("UPDATE pools SET target_week=? WHERE id=?", (playable, pool["id"]))
                 conn.commit()
                 pool = conn.execute("SELECT * FROM pools WHERE id=?", (pool["id"],)).fetchone()
@@ -1246,6 +1274,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not player["is_host"]:
                     raise ValueError("Only the host can score.")
                 week = int(body.get("week") or (pool["target_week"] - 1))
+                if week >= current_open_week() or not week_games_started(week):
+                    raise ValueError(
+                        f"Week {week} games have not been played yet. "
+                        f"Ballots stay open until Saturday {week_deadline(week).strftime('%b %d')} 11:00 AM ET."
+                    )
                 off = conn.execute(
                     "SELECT ranks FROM official WHERE pool_id=? AND week=?",
                     (pool["id"], week),
