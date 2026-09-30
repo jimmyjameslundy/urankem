@@ -314,7 +314,8 @@ function mineView(){
 function standingsView(){
   const scores=S.snap.scores||{};
   const week=S.week||S.snap.pool.target_week;
-  const weekRows=(scores[String(week)]||[]).slice().sort((a,b)=>b.total-a.total);
+  const played=!!((S.snap.pool.week_locks||{})[String(week)]);
+  const weekRows=played?((scores[String(week)]||[]).slice().sort((a,b)=>b.total-a.total)):[];
   const names={}; (S.snap.players||[]).forEach(p=>names[p.id]=p.name);
   const winner=weekRows[0];
   return `
@@ -324,7 +325,7 @@ function standingsView(){
   <div class="grid">
     <div class="card">
       <h2>Week ${week} ${weekRows.length?"winner":""}</h2>
-      ${!weekRows.length?'<p class="muted">Host scores after the AP poll posts Monday.</p>':
+      ${!weekRows.length?'<p class="muted">This week has not been scored. Ballots stay open until Saturday 11:00 AM ET of that week\'s games. Standings appear after those games and the next AP poll.</p>':
         `<p class="lede">${names[winner.player_id]||"?"} — <b class="num">${winner.total}</b> pts</p>
          <table><thead><tr><th>#</th><th>Player</th><th>Pts</th><th>Exact</th></tr></thead>
          <tbody>${weekRows.map((r,i)=>`<tr><td>${i+1}</td><td>${names[r.player_id]||"?"}</td><td class="num">${r.total}</td><td>${r.exact}</td></tr>`).join("")}</tbody></table>`}
