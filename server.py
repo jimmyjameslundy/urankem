@@ -73,6 +73,14 @@ def week_games_started(week: int, now_et: datetime | None = None) -> bool:
     return now_et >= week_deadline(week)
 
 
+def current_open_week(now_et: datetime | None = None) -> int:
+    now_et = now_et or datetime.now(ET)
+    for w in range(1, 17):
+        if now_et < week_deadline(w):
+            return w
+    return 16
+
+
 def ballot_lock(conn, pool, week):
     now_et = datetime.now(ET)
     due = week_deadline(week)
@@ -911,7 +919,8 @@ class Handler(BaseHTTPRequestHandler):
                 "name": pool["name"],
                 "host_name": pool["host_name"],
                 "host_email": pool["host_email"] if "host_email" in pool.keys() else "",
-                "target_week": pool["target_week"],
+                "target_week": pool["target_week"] if not week_games_started(int(pool["target_week"])) else current_open_week(),
+                "current_open_week": current_open_week(),
                 "created": pool["created"],
                 "ballot_locked": ballot_lock(conn, pool, pool["target_week"])[0],
                 "ballot_lock_reason": ballot_lock(conn, pool, pool["target_week"])[1],
@@ -1104,8 +1113,6 @@ class Handler(BaseHTTPRequestHandler):
                 if len(set(teams)) != 20:
                     raise ValueError("Each team only once.")
                 week = int(body.get("week") or pool["target_week"])
-                if week != int(pool["target_week"]):
-                    raise ValueError(f"Open ballot is week {pool['target_week']}. Host must change the open week to submit a different week.")
                 locked, why = ballot_lock(conn, pool, week)
                 if locked:
                     raise ValueError(why)
