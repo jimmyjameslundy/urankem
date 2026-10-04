@@ -82,22 +82,73 @@ def current_open_week(now_et: datetime | None = None) -> int:
 
 
 def purge_unplayed_scores(conn, pool_id):
-    """Remove scores for weeks whose Saturday kickoff has not happened yet."""
+    """Remove scores for weeks whose Saturday has not happened, or that were scored on the previous poll."""
     open_w = current_open_week()
     rows = conn.execute(
         "SELECT DISTINCT week FROM scores WHERE pool_id=?",
         (pool_id,),
     ).fetchall() or []
+    official = {
+        int(r["week"]): json.loads(r["ranks"])
+        for r in conn.execute(
+            "SELECT week, ranks FROM official WHERE pool_id=?",
+            (pool_id,),
+        ).fetchall() or []
+    }
     for row in rows:
         w = int(row["week"])
-        if w >= open_w or not week_games_started(w):
+        ranks = official.get(w) or []
+        stale = bool(ranks) and not poll_is_new_for_week(w, ranks)
+        if w >= open_w or not week_games_started(w) or stale:
             conn.execute("DELETE FROM scores WHERE pool_id=? AND week=?", (pool_id, w))
             conn.execute("DELETE FROM reports WHERE pool_id=? AND week=?", (pool_id, w))
-            conn.execute(
-                "INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-                (f"hold_score_{pool_id}_{w}", "1"),
-            )
     conn.commit()
+
+
+def top20_sig(ranks) -> str:
+    names = []
+    for item in (ranks or [])[:20]:
+        if isinstance(item, dict):
+            name = item.get("name") or ""
+        elif isinstance(item, (list, tuple)):
+            name = item[1] if len(item) > 1 else ""
+        else:
+            name = str(item)
+        names.append(canon(name))
+    return "|".join(names)
+
+
+def prior_poll_sig(week: int) -> str:
+    """Signature of the poll already published before this week's new poll."""
+    names = AP_HISTORY.get(int(week) - 1)
+    if not names:
+        return ""
+    return top20_sig([[i, n] for i, n in enumerate(names, 1)])
+
+
+def poll_is_new_for_week(week: int, ranks) -> bool:
+    sig = top20_sig(ranks)
+    if not sig or sig.count("|") < 19:
+        return False
+    prior = prior_poll_sig(week)
+    if prior and sig == prior:
+        return False
+    return True
+
+
+def score_block_reason(week: int, ranks) -> str:
+    if not week_games_started(week):
+        due = week_deadline(week)
+        return (
+            f"Week {week} games have not been played yet. "
+            f"Ballots stay open until Saturday {due.strftime('%b %d')} 11:00 AM ET."
+        )
+    if not poll_is_new_for_week(week, ranks):
+        return (
+            f"Week {week} cannot be scored. The poll on file is still the previous week's AP poll. "
+            f"Scoring waits until the new poll is released."
+        )
+    return ""
 
 
 def ballot_lock(conn, pool, week):
@@ -624,6 +675,8 @@ def apply_published_poll(conn, live):
             (f"hold_score_{pool['id']}_{week}",),
         ).fetchone()
         ready = week_games_started(week) and week < current_open_week()
+        if ready and not poll_is_new_for_week(week, official):
+            ready = False
         if has_ballots and not already and not hold and ready:
             result = score_pool_week(conn, pool, week, official)
             if result:
@@ -1274,18 +1327,19 @@ class Handler(BaseHTTPRequestHandler):
                 if not player["is_host"]:
                     raise ValueError("Only the host can score.")
                 week = int(body.get("week") or (pool["target_week"] - 1))
-                if week >= current_open_week() or not week_games_started(week):
-                    raise ValueError(
-                        f"Week {week} games have not been played yet. "
-                        f"Ballots stay open until Saturday {week_deadline(week).strftime('%b %d')} 11:00 AM ET."
-                    )
                 off = conn.execute(
                     "SELECT ranks FROM official WHERE pool_id=? AND week=?",
                     (pool["id"], week),
                 ).fetchone()
                 if not off:
-                    raise ValueError(f"No official Top 20 saved for week {week}.")
+                    raise ValueError(
+                        f"No new AP poll is saved for week {week}. "
+                        "Scoring waits until that poll is released."
+                    )
                 ranks = json.loads(off["ranks"])
+                why = score_block_reason(week, ranks)
+                if why:
+                    raise ValueError(why)
                 mapping = official_map(ranks)
                 ballots = conn.execute(
                     "SELECT player_id, teams FROM ballots WHERE pool_id=? AND week=?",
