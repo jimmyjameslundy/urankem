@@ -98,7 +98,7 @@ def purge_unplayed_scores(conn, pool_id):
     for row in rows:
         w = int(row["week"])
         ranks = official.get(w) or []
-        stale = bool(ranks) and not poll_is_new_for_week(w, ranks)
+        stale = bool(ranks) and not poll_is_new_for_week(w, ranks, conn, pool_id)
         if w >= open_w or not week_games_started(w) or stale:
             conn.execute("DELETE FROM scores WHERE pool_id=? AND week=?", (pool_id, w))
             conn.execute("DELETE FROM reports WHERE pool_id=? AND week=?", (pool_id, w))
@@ -118,32 +118,41 @@ def top20_sig(ranks) -> str:
     return "|".join(names)
 
 
-def prior_poll_sig(week: int) -> str:
+def prior_poll_sig(week: int, conn=None, pool_id=None) -> str:
     """Signature of the poll already published before this week's new poll."""
+    if conn is not None and pool_id is not None and int(week) > 1:
+        row = conn.execute(
+            "SELECT ranks FROM official WHERE pool_id=? AND week=?",
+            (pool_id, int(week) - 1),
+        ).fetchone()
+        if row:
+            sig = top20_sig(json.loads(row["ranks"]))
+            if sig:
+                return sig
     names = AP_HISTORY.get(int(week) - 1)
     if not names:
         return ""
     return top20_sig([[i, n] for i, n in enumerate(names, 1)])
 
 
-def poll_is_new_for_week(week: int, ranks) -> bool:
+def poll_is_new_for_week(week: int, ranks, conn=None, pool_id=None) -> bool:
     sig = top20_sig(ranks)
     if not sig or sig.count("|") < 19:
         return False
-    prior = prior_poll_sig(week)
+    prior = prior_poll_sig(week, conn, pool_id)
     if prior and sig == prior:
         return False
     return True
 
 
-def score_block_reason(week: int, ranks) -> str:
+def score_block_reason(week: int, ranks, conn=None, pool_id=None) -> str:
     if not week_games_started(week):
         due = week_deadline(week)
         return (
             f"Week {week} games have not been played yet. "
             f"Ballots stay open until Saturday {due.strftime('%b %d')} 11:00 AM ET."
         )
-    if not poll_is_new_for_week(week, ranks):
+    if not poll_is_new_for_week(week, ranks, conn, pool_id):
         return (
             f"Week {week} cannot be scored. The poll on file is still the previous week's AP poll. "
             f"Scoring waits until the new poll is released."
@@ -643,16 +652,32 @@ def score_pool_week(conn, pool, week, official_ranks):
     return {"week": week, "players": len(results), "report": text}
 
 
+def ballot_week_for_poll(ranks, conn=None, pool_id=None) -> int:
+    """Ballot week this poll should score: the latest week whose Saturday has passed and whose previous poll is different."""
+    finished = current_open_week() - 1
+    if finished < 1:
+        return 0
+    if poll_is_new_for_week(finished, ranks, conn, pool_id):
+        return finished
+    return 0
+
+
 def apply_published_poll(conn, live):
     poll_week = int(live["week"])
     official = live["official"]
-    # Ballots labeled week G are a prediction of the poll AFTER those games.
-    # ESPN "AP Week P" is that post-game poll, so score game-week P-1.
-    week = poll_week - 1
+    # ESPN labels the poll after week N games as week N+1. Score the ballots for the week that just finished.
+    week = ballot_week_for_poll(official, conn, None)
     if poll_week < 1 or len(official) < 20:
         return {"poll": live, "scored": []}
     scored = []
     for pool in conn.execute("SELECT * FROM pools").fetchall():
+        week = ballot_week_for_poll(official, conn, pool["id"])
+        if week >= 1:
+            conn.execute(
+                """INSERT INTO official(pool_id,week,ranks) VALUES(?,?,?)
+                   ON CONFLICT(pool_id,week) DO UPDATE SET ranks=excluded.ranks""",
+                (pool["id"], week, json.dumps(official)),
+            )
         conn.execute(
             """INSERT INTO official(pool_id,week,ranks) VALUES(?,?,?)
                ON CONFLICT(pool_id,week) DO UPDATE SET ranks=excluded.ranks""",
@@ -675,7 +700,7 @@ def apply_published_poll(conn, live):
             (f"hold_score_{pool['id']}_{week}",),
         ).fetchone()
         ready = week_games_started(week) and week < current_open_week()
-        if ready and not poll_is_new_for_week(week, official):
+        if ready and not poll_is_new_for_week(week, official, conn, pool["id"]):
             ready = False
         if has_ballots and not already and not hold and ready:
             result = score_pool_week(conn, pool, week, official)
@@ -1331,13 +1356,35 @@ class Handler(BaseHTTPRequestHandler):
                     "SELECT ranks FROM official WHERE pool_id=? AND week=?",
                     (pool["id"], week),
                 ).fetchone()
-                if not off:
+                ranks = json.loads(off["ranks"]) if off else []
+                live_row = conn.execute("SELECT v FROM meta WHERE k='last_poll'").fetchone()
+                live_ranks = []
+                if live_row:
+                    live = json.loads(live_row["v"])
+                    live_ranks = live.get("official") or live.get("ranks") or []
+                if not poll_is_new_for_week(week, ranks, conn, pool["id"]) or not live_ranks:
+                    try:
+                        fetched = fetch_ap()
+                        live_ranks = fetched.get("official") or fetched.get("ranks") or []
+                        conn.execute(
+                            "INSERT INTO meta(k,v) VALUES('last_poll',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                            (json.dumps(fetched),),
+                        )
+                    except Exception:
+                        pass
+                if not poll_is_new_for_week(week, ranks, conn, pool["id"]) and poll_is_new_for_week(week, live_ranks, conn, pool["id"]):
+                    ranks = live_ranks
+                    conn.execute(
+                        """INSERT INTO official(pool_id,week,ranks) VALUES(?,?,?)
+                           ON CONFLICT(pool_id,week) DO UPDATE SET ranks=excluded.ranks""",
+                        (pool["id"], week, json.dumps(ranks)),
+                    )
+                if not ranks:
                     raise ValueError(
                         f"No new AP poll is saved for week {week}. "
                         "Scoring waits until that poll is released."
                     )
-                ranks = json.loads(off["ranks"])
-                why = score_block_reason(week, ranks)
+                why = score_block_reason(week, ranks, conn, pool["id"])
                 if why:
                     raise ValueError(why)
                 mapping = official_map(ranks)
