@@ -914,12 +914,16 @@ class Handler(BaseHTTPRequestHandler):
         return row
 
     def _player(self, conn, pool_id, name, pin):
+        name = (name or "").strip()
+        pin = (pin or "").strip()
         row = conn.execute(
-            "SELECT * FROM players WHERE pool_id=? AND name=?", (pool_id, name.strip())
+            "SELECT * FROM players WHERE pool_id=? AND lower(name)=lower(?)",
+            (pool_id, name),
         ).fetchone()
         if not row:
-            raise ValueError("Name not in this pool.")
-        if row["pin"] != pin:
+            raise ValueError("Name not in this pool. Use the same name you joined with.")
+        row = self._as_dict(row)
+        if str(row["pin"]).strip() != pin:
             raise ValueError("Wrong PIN for that name.")
         return row
 
