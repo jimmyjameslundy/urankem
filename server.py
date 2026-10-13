@@ -1100,6 +1100,13 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
         if path == "/api/health":
             return self._json(200, {"ok": True, "service": "U-RankEm", "db": "postgres" if USE_PG else "sqlite"})
+        if path == "/api/pools/list":
+            conn = db()
+            try:
+                rows = conn.execute("SELECT code, name, host_name, created FROM pools ORDER BY created DESC").fetchall()
+                return self._json(200, {"pools": [dict(r) for r in rows]})
+            finally:
+                conn.close()
         if path == "/api/poll":
             conn = db()
             try:
@@ -1156,6 +1163,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 conn.commit()
                 pool = self._pool(conn, code)
+                # Confirm it is readable before handing the code back.
+                check = conn.execute("SELECT 1 FROM pools WHERE code=?", (code,)).fetchone()
+                if not check:
+                    raise ValueError("Pool was created but could not be read back. Try again.")
                 return self._json(
                     200,
                     {
