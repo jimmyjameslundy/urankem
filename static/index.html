@@ -159,6 +159,7 @@ function render(){
   else if(S.view==="host") app.innerHTML = hostView();
   else app.innerHTML = boardView();
   bind();
+  if(S.view==="board"||!S.view||S.view==="home") setTimeout(loadCrossPool, 50);
   }catch(err){
     console.error(err);
     document.getElementById("app").innerHTML = '<div class="card"><h2>Page error</h2><p class="muted">'+String(err)+'</p><p><button onclick="signOut()">Back to home</button></p></div>';
@@ -185,7 +186,7 @@ function home(){
     <div class="card">
       <h2>Join / sign in</h2>
       <form class="stack" id="joinF">
-        <input name="code" value="${q}" placeholder="Pool code" required maxlength="8" style="text-transform:uppercase">
+        <input name="code" value="${q}" placeholder="Pool code" required maxlength="8" autocomplete="off" style="text-transform:uppercase">
         <input name="name" placeholder="Your name" required>
         <input name="email" type="email" placeholder="Your email (so the host can reach you)">
         <input name="pin" type="password" inputmode="numeric" placeholder="Your PIN (4+ digits)" required>
@@ -234,7 +235,25 @@ function boardView(){
         <button class="ghost" onclick="signOut()">Join a different pool</button>
       </div>
     </div>
-  </div>`;
+  </div>
+  <div class="card" id="crossPool"><p class="muted">Loading cross-pool results…</p></div>`;
+}
+function loadCrossPool(){
+  const box=document.getElementById("crossPool");
+  if(!box) return;
+  fetch("/api/board-summary").then(r=>r.json()).then(data=>{
+    const leader=data.season_leader;
+    const weekly=(data.weekly||[]).slice().reverse();
+    const top=(data.top_season||[]).slice(0,5);
+    box.innerHTML=`
+      <h2>Across all pools</h2>
+      ${leader?`<p class="lede">Season leader: <b>${leader.player}</b> · ${leader.pts} pts · ${leader.pool} <code>${leader.code}</code></p>`:'<p class="muted">No scores yet.</p>'}
+      ${top.length?`<table><thead><tr><th>#</th><th>Player</th><th>Pool</th><th>Pts</th></tr></thead>
+      <tbody>${top.map((s,i)=>`<tr><td>${i+1}</td><td>${s.player}</td><td>${s.pool}</td><td class="num">${s.pts}</td></tr>`).join("")}</tbody></table>`:''}
+      ${weekly.length?`<h2 style="margin-top:14px">Recent weekly winners</h2>
+      <table><thead><tr><th>Week</th><th>Player</th><th>Pool</th><th>Pts</th></tr></thead>
+      <tbody>${weekly.map(w=>`<tr><td>${w.week}</td><td>${w.player}</td><td>${w.pool}</td><td class="num">${w.pts}</td></tr>`).join("")}</tbody></table>`:''}`;
+  }).catch(()=>{ box.innerHTML='<p class="muted">Could not load cross-pool results.</p>'; });
 }
 function ballotView(){
   const poll=ranks();
@@ -430,7 +449,8 @@ function bind(){
   if(j) j.onsubmit=async e=>{
     e.preventDefault();
     const f=new FormData(j);
-    const code=(f.get("code")||"").toUpperCase();
+    const fromLink=(new URLSearchParams(location.search).get("pool")||"").toUpperCase();
+    const code=(fromLink || f.get("code")||"").toUpperCase();
     try{
       const data=await api("/api/pools/"+encodeURIComponent(code)+"/join",{code:code,name:f.get("name"),pin:f.get("pin"),email:f.get("email")});
       enter(data, f.get("pin")); flash("You're in "+data.code);
