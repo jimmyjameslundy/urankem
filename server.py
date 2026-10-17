@@ -835,6 +835,8 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path in ("/", "/index.html"):
             return self._file(STATIC / "index.html", "text/html; charset=utf-8")
+        if path == "/results":
+            return self._file(STATIC / "results.html", "text/html; charset=utf-8")
         if path.startswith("/api/"):
             return self._api_get(path, parse_qs(parsed.query))
         rel = path.lstrip("/")
@@ -1105,6 +1107,74 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 rows = conn.execute("SELECT code, name, host_name, created FROM pools ORDER BY created DESC").fetchall()
                 return self._json(200, {"pools": [dict(r) for r in rows]})
+            finally:
+                conn.close()
+        if path == "/api/board-summary":
+            conn = db()
+            try:
+                pools = {r["id"]: r for r in conn.execute("SELECT id, code, name FROM pools")}
+                names = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM players")}
+                scores = conn.execute("SELECT pool_id, week, player_id, total FROM scores").fetchall()
+                by_week = {}
+                season = {}
+                for s in scores:
+                    by_week.setdefault(s["week"], []).append(s)
+                    key = (s["pool_id"], s["player_id"])
+                    season.setdefault(key, 0)
+                    season[key] += s["total"]
+                weekly = []
+                for week, rows in sorted(by_week.items()):
+                    best = max(r["total"] for r in rows)
+                    winners = [r for r in rows if r["total"] == best]
+                    for w in winners:
+                        weekly.append({
+                            "week": week,
+                            "player": names.get(w["player_id"], "?"),
+                            "pool": pools.get(w["pool_id"], {}).get("name", "?"),
+                            "code": pools.get(w["pool_id"], {}).get("code", ""),
+                            "pts": w["total"],
+                        })
+                season_list = sorted(
+                    [{"player": names.get(pid, "?"), "pool": pools.get(pool_id, {}).get("name", "?"), "code": pools.get(pool_id, {}).get("code", ""), "pts": pts}
+                     for (pool_id, pid), pts in season.items()],
+                    key=lambda x: -x["pts"],
+                )
+                return self._json(200, {"weekly": weekly[-10:], "season_leader": season_list[0] if season_list else None, "top_season": season_list[:5]})
+            finally:
+                conn.close()
+            conn = db()
+            try:
+                pools = conn.execute("SELECT id, code, name, host_name, created FROM pools ORDER BY created DESC").fetchall()
+                out = []
+                for p in pools:
+                    scores = conn.execute(
+                        "SELECT week, player_id, total FROM scores WHERE pool_id=?",
+                        (p["id"],),
+                    ).fetchall()
+                    names = {
+                        r["id"]: r["name"]
+                        for r in conn.execute("SELECT id, name FROM players WHERE pool_id=?", (p["id"],))
+                    }
+                    season = {}
+                    weeks = set()
+                    for s in scores:
+                        weeks.add(s["week"])
+                        season.setdefault(s["player_id"], {"pts": 0, "weeks": 0})
+                        season[s["player_id"]]["pts"] += s["total"]
+                        season[s["player_id"]]["weeks"] += 1
+                    standings = sorted(
+                        [{"name": names.get(pid, "?"), "pts": v["pts"], "weeks": v["weeks"]} for pid, v in season.items()],
+                        key=lambda x: -x["pts"],
+                    )
+                    out.append({
+                        "code": p["code"],
+                        "name": p["name"],
+                        "host": p["host_name"],
+                        "created": p["created"],
+                        "weeks_scored": len(weeks),
+                        "standings": standings[:5],
+                    })
+                return self._json(200, {"pools": out})
             finally:
                 conn.close()
         if path == "/api/poll":
